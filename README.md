@@ -1,5 +1,6 @@
 # BrightBounceVRAD-OrangeBox
 Light bouncing from Goldsource ported to Source (to avoid original HL2's impression of Doom2 per-sector lighting)
+
 Was really annoyed by cases like this:
 <img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/30273262-943d-4b6c-abfa-01a9645f2bae" />
 

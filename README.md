@@ -21,6 +21,9 @@ Since HL2 was made with so much fake lighting, clean it up:
 How I compiled the maps:
 "D:\Ultimate SSDK v3\SourceSDK\Bin\source2009\bin\vrad.exe" -low -threads 9 -StaticPropPolys -StaticPropLighting -TextureShadows -Final -LightingFixes -ZHLTbounce -Uniform -Cloudlight -LargeDispSampleRadius "D:\games\Half-Life_2_Update\hl2\maps\background01"
 
+The result was a small mod:
+https://www.moddb.com/mods/natural-relight-r2
+
 For debug purposes you can disable different lighting types or all at once:  
 -SkipPointlights  
 -SkipSpotlights  

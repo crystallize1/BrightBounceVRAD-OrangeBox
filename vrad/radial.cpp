@@ -14,8 +14,10 @@
 #include "mathlib/VMatrix.h"
 #include "macro_texture.h"
 
-extern float MaxLuxelIntensity;
+extern float TargetLuxelIntensity;
 extern float RGBintensity( Vector color );
+extern float flIndirectScale;
+extern float g_fTonemappingGamma;
 
 void WorldToLuxelSpace( lightinfo_t const *l, Vector const &world, Vector2D &coord )
 {
@@ -67,6 +69,43 @@ void LuxelSpaceToWorld( lightinfo_t const *l, fltx4 s, fltx4 t, FourVectors &wor
 	world += st;
 }
 
+Vector TonemappingWithAnchor( Vector vecInput )
+{
+	float RangeBeforeHalving = 512;
+	float gamma = 1 / g_fTonemappingGamma;
+	float anchor=55.f;
+	anchor *= 1/RangeBeforeHalving;
+	float tweak = pow(0.9322f,2.2f);
+	float tmp;
+	float LinearCompensate = (anchor/pow(anchor,gamma))*tweak;
+	for(int i=0; i<3; i++)
+	{
+		tmp = vecInput[i];
+		tmp = pow( tmp/RangeBeforeHalving, gamma ) * LinearCompensate * RangeBeforeHalving;
+		vecInput[i] = tmp;
+	}
+	return vecInput;
+}
+
+
+//  to heal green lightmap in bright areas like fire
+Vector RenormalizeLighting( Vector vecInput )
+{
+	float sample = VectorMaximum ( vecInput );
+	if( sample && sample>TargetLuxelIntensity )
+		VectorScale( vecInput, TargetLuxelIntensity/sample, vecInput );
+	return vecInput;
+}
+
+
+//  to heal green lightmap in bright areas like fire
+Vector RenormalizeLightingUp( Vector vecInput, float target )
+{
+	float sample = VectorMaximum ( vecInput );
+	if(  sample  &&  sample < target  )
+		VectorScale( vecInput, target/sample, vecInput );
+	return vecInput;
+}
 
 
 void AddDirectToRadial( radial_t *rad, 
@@ -633,6 +672,7 @@ void CloseDispLuxels()
 	}
 }
 
+
 /*
 =============
 FinalLightFace
@@ -721,11 +761,11 @@ void FinalLightFace( int iThread, int facenum )
 		if (numbounce > 0 && k == 0)
 		{
 			// currently only radiosity light non-displacement surfaces!
-			if( !bDisp )
+			if( !bDisp )// nondisplacement
 			{
 				prad = BuildPatchRadial( facenum );
 			}
-			else
+			else//displacement
 			{
 				prad = StaticDispMgr()->BuildPatchRadial( facenum, needsBumpmap );
 			}
@@ -739,7 +779,7 @@ void FinalLightFace( int iThread, int facenum )
 		// of light data if we don't have bumped lighting.
 		for( bumpSample = 0; bumpSample < bumpSampleCount; ++bumpSample )
 		{
-			pdata[bumpSample] = &(*pdlightdata)[f->lightofs + (k * bumpSampleCount + bumpSample) * fl->numluxels*4]; 
+			pdata[bumpSample] = &(*pdlightdata)[f->lightofs + (k * bumpSampleCount + bumpSample) * fl->numluxels*4];
 		}
 
 		// Compute the average luxel color, but not for the bump samples
@@ -782,12 +822,14 @@ void FinalLightFace( int iThread, int facenum )
 				{
 					StaticDispMgr()->SampleRadial( facenum, prad, fl->luxel[j], j, v, bumpSampleCount, true );
 				}
+			
 
 				for( bumpSample = 0; bumpSample < bumpSampleCount; ++bumpSample )
 				{
 					lb[bumpSample].AddLight( v[bumpSample] );
 				}
 			}
+			
 
 			if ( bDisp && g_bDumpPatches )
 			{
@@ -832,63 +874,33 @@ void FinalLightFace( int iThread, int facenum )
 					m_Red.Insert( lb[bumpSample].m_vecLighting[0] );
 					m_Green.Insert( lb[bumpSample].m_vecLighting[1] );
 					m_Blue.Insert( lb[bumpSample].m_vecLighting[2] );
-				}
-
-				//float tmp=0;
-				/*if( !g_bHDR )
-				{
-					float cap = 255.f;
-					float max = VectorMaximum( lb[bumpSample].m_vecLighting );
-					float minimum = min( min( lb[bumpSample].m_vecLighting.x, lb[bumpSample].m_vecLighting.y ), lb[bumpSample].m_vecLighting.z );
-					if( (max > cap) && (minimum<cap) )
-					{
-						printf("%.f %.f %.f to ", lb[bumpSample].m_vecLighting.x,lb[bumpSample].m_vecLighting.y,lb[bumpSample].m_vecLighting.z );
-						
-						lb[bumpSample].m_vecLighting -= minimum;
-						max -= minimum;
-						lb[bumpSample].m_vecLighting *= max/cap;
-						lb[bumpSample].m_vecLighting += minimum;
-						printf("%.f %.f %.f\n", lb[bumpSample].m_vecLighting.x,lb[bumpSample].m_vecLighting.y,lb[bumpSample].m_vecLighting.z );
-					}
-				}*/
+				}			
 				
-				// does not affect props yet, but it's not hard to do
-				if ( MaxLuxelIntensity )  // && !g_bHDR )
-				{
-					float tmp = VectorMaximum ( lb[bumpSample].m_vecLighting );
-					if (tmp > MaxLuxelIntensity)
-						VectorScale( lb[bumpSample].m_vecLighting, MaxLuxelIntensity/tmp, lb[bumpSample].m_vecLighting );
-				}
 
-				/*Vector oldluxel = lb[bumpSample].m_vecLighting;
-				float oldluma = RGBintensity(lb[bumpSample].m_vecLighting);*/
-				/*for( int k=0; k<2; k++ )//fiv
-				{
-					float tmp = lb[bumpSample].m_vecLighting[k];
-					tmp = pow( tmp / 255.0f, 0.45f/0.5f ) * 255;//2.2=violet, 0.45=yellow-green
-					lb[bumpSample].m_vecLighting[k] = tmp;
-				}*/
-				/*float newluma = RGBintensity(lb[bumpSample].m_vecLighting);
-				float overhead = newluma / oldluma;
-				lb[bumpSample].m_vecLighting = oldluxel * overhead;//preserve hue! :)*/
+
+				//  simple tone mapping
+				if( g_fTonemappingGamma != 1.0f )
+					lb[bumpSample].m_vecLighting = TonemappingWithAnchor( lb[bumpSample].m_vecLighting );				
+
+	
+				//  renormalization
+				if( !TargetLuxelIntensity && !g_bHDR )
+					TargetLuxelIntensity = 512; // lightmap intensity doubling
+				if( TargetLuxelIntensity )					
+					lb[bumpSample].m_vecLighting = RenormalizeLighting( lb[bumpSample].m_vecLighting );				
+			
 				
 				
-#ifdef RANDOM_COLOR
-				pdata[bumpSample][0] = randomColor[0] / ( bumpSample + 1 );
-				pdata[bumpSample][1] = randomColor[1] / ( bumpSample + 1 );
-				pdata[bumpSample][2] = randomColor[2] / ( bumpSample + 1 );
-				pdata[bumpSample][3] = 0;
-#else
-				float tmp = VectorMaximum ( lb[bumpSample].m_vecLighting );
-				if(  !g_bHDR  &&  tmp>1023.f  )
-				{
-					VectorScale( lb[bumpSample].m_vecLighting, 1023/tmp, lb[bumpSample].m_vecLighting );
-				}
-
-				// convert to a 4 byte r,g,b,signed exponent format
-				VectorToColorRGBExp32( Vector( lb[bumpSample].m_vecLighting.x, lb[bumpSample].m_vecLighting.y,
-											   lb[bumpSample].m_vecLighting.z ), *( ColorRGBExp32 *)pdata[bumpSample] );
-#endif
+				#ifdef RANDOM_COLOR
+					pdata[bumpSample][0] = randomColor[0] / ( bumpSample + 1 );
+					pdata[bumpSample][1] = randomColor[1] / ( bumpSample + 1 );
+					pdata[bumpSample][2] = randomColor[2] / ( bumpSample + 1 );
+					pdata[bumpSample][3] = 0;
+				#else
+					// convert to a 4 byte r,g,b,signed exponent format
+					VectorToColorRGBExp32( Vector( lb[bumpSample].m_vecLighting.x, lb[bumpSample].m_vecLighting.y,
+												   lb[bumpSample].m_vecLighting.z ), *( ColorRGBExp32 *)pdata[bumpSample] );
+				#endif
 
 				pdata[bumpSample] += 4;
 			}
@@ -906,6 +918,7 @@ void FinalLightFace( int iThread, int facenum )
 		if (avgCount == 0)
 		{
 			Vector median( 0, 0, 0 );
+
 			VectorToColorRGBExp32( median, *pAvgColor );
 		}
 		else
@@ -924,6 +937,20 @@ void FinalLightFace( int iThread, int facenum )
 			}
 
 			Vector median( m_Red[r], m_Green[g], m_Blue[b] );
+
+
+			//  simple tone mapping
+			if( g_fTonemappingGamma != 1.0f )
+				median = TonemappingWithAnchor( median );				
+
+
+			//  renormalization
+			if( !TargetLuxelIntensity && !g_bHDR )
+				TargetLuxelIntensity = 512; // lightmap intensity doubling
+			if( TargetLuxelIntensity )					
+				median = RenormalizeLighting( median );
+
+
 			VectorToColorRGBExp32( median, *pAvgColor );
 		}
 	}

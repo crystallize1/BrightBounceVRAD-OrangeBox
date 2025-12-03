@@ -23,6 +23,8 @@
 #include "byteswap.h"
 
 bool LoadStudioModel( char const* pModelName, CUtlBuffer& buf );
+extern float TargetLuxelIntensity;
+extern Vector RenormalizeLighting( Vector vecInput );
 
 
 //-----------------------------------------------------------------------------
@@ -162,8 +164,6 @@ static void ComputeMaxDirectLighting( DetailObjectLump_t& prop, Vector* maxcolor
 	// The max direct lighting must be along the direction to one
 	// of the static lights....
 
-	extern bool g_bCloudLight;
-
 	Vector origin, normal;
 	ComputeWorldCenter( prop, origin, normal );
 
@@ -228,15 +228,9 @@ static void ComputeMaxDirectLighting( DetailObjectLump_t& prop, Vector* maxcolor
 		origin4.DuplicateVector( origin );
 		normal4.DuplicateVector( normal );
 
-		if( g_bCloudLight )
-		{
-			g_SunAngularExtent = sin(M_PI/180.0)*1;
-			if( g_bCloudLight && dl->light.type==emit_skylight && dl->light.origin.Length() == 0 )
-			{
-				g_SunAngularExtent = dl->light.radius;
-			//	printf("sun %.f %.f %.f\n", dl->light.origin.x,dl->light.origin.y,dl->light.origin.z);
-			}
-		}
+
+		
+		
 		GatherSampleLightSSE ( out, dl, -1, origin4, &normal4, 1, iThread );
 		VectorMA( maxcolor[dl->light.style], out.m_flFalloff.m128_f32[0] * out.m_flDot[0].m128_f32[0], dl->light.intensity, maxcolor[dl->light.style] );
 	}
@@ -712,7 +706,9 @@ void ComputeIndirectLightingAtPoint( Vector &position, Vector &normal, Vector &o
 
 		// get color from surface lightmap
 		texinfo_t* pTex = &texinfo[surfEnum.m_pSurface->texinfo];
-		if ( !pTex || pTex->flags & SURF_SKY )
+//		dplane_t *plane = &dplanes[surfEnum.m_pSurface->planenum];
+		
+		if ( !pTex || pTex->flags&SURF_SKY )
 		{
 			// ignore contribution from sky
 			// sky ambient already accounted for during direct pass
@@ -807,19 +803,33 @@ static void ComputeLighting( DetailObjectLump_t& prop, int iThread )
 	// Base lighting
 	Vector totalColor;
 	VectorAdd( directColor[0], ambColor[0], totalColor );
+		if( !TargetLuxelIntensity && !g_bHDR )
+			TargetLuxelIntensity = 512;
+		if( TargetLuxelIntensity )
+			totalColor = RenormalizeLighting( totalColor );
 	VectorToColorRGBExp32( totalColor, prop.m_Lighting );
 
 	bool hasLightstyles = false;
 	prop.m_LightStyleCount = 0;
 	
 	// lightstyles
+
+//no halving because...
 	for (int i = 1; i < MAX_LIGHTSTYLES; ++i )
 	{
 		VectorAdd( directColor[i], ambColor[i], totalColor );
-		totalColor *= 0.5f;
 
-		if ((totalColor[0] != 0.0f) || (totalColor[1] != 0.0f) ||
-			(totalColor[2] != 0.0f) )
+		if( !TargetLuxelIntensity && !g_bHDR )
+			TargetLuxelIntensity = 512;
+		if( TargetLuxelIntensity )
+			totalColor = RenormalizeLighting( totalColor );
+
+//...halving is here
+		totalColor *= 0.5f;		
+
+		if ((totalColor[0] != 0.0f) 
+		|| (totalColor[1] != 0.0f) 
+		|| (totalColor[2] != 0.0f) )
 		{
 			if (!hasLightstyles)
 			{

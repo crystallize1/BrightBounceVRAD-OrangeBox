@@ -28,49 +28,44 @@
 
 
 extern		float		g_fGammaScale;
-extern		float		g_fLightIntensityScale;
 
 extern		bool		g_bDebugClouds;
-extern		bool		g_bCloudLight;
+extern		bool		g_bCloudlight;
 extern		bool		g_bPullLight;
-extern		bool		g_bSuperUniform;
-extern		bool		g_bSkipChildren;
-extern		bool		g_bSimpleChildren;
+extern		bool		g_bLightbleeds;
+extern		bool		g_bPullFromChildren;
 
 extern		bool		g_bSkipPointlights;
 extern		bool		g_bSkipSpotlights;
-extern		bool		g_bSkipSun;
-extern		bool		g_bSkipFakeLights;
+extern		bool		g_bSkipSunlight_Skylight;
+extern		bool		g_bLightingFixes;
 extern		bool		g_bForceTexlights;
 extern		bool		g_bForceAttn;
 extern		bool		g_bHL1Bounce;
-extern				int	propcount;
-extern		const	int	propcap = 600;
 
-extern Vector bulbproporg[propcap];
-extern Vector bulbpropang[propcap];
+extern bool Axial( float angle );
 
-extern Vector fluorproporg[propcap];
-extern Vector fluorpropang[propcap];
+extern int nBulb, nFluor, nOmnifluor, nNozzle, nNotadevice;
 
-extern Vector nozzleproporg[propcap];
-extern Vector nozzlepropang[propcap];
+Vector *BulbOrg;
+Vector *BulbAngles;//storing prop angs can be useful
 
-extern Vector projproporg[propcap];
-extern Vector projpropang[propcap];
+Vector *FluorOrg;
+Vector *FluorAngles;
 
-extern Vector extsunlight, extambient;
+Vector *OmnifluorOrg;
+Vector *OmnifluorAngles;
 
-extern int iBulb, iFluor, iNozzle, iProj;
+Vector *NozzleOrg;
+Vector *NozzleAngles;
+
+Vector *NotadeviceOrg;
+Vector *NotadeviceAngles;
+//  dont forget to deallocate
 
 const int maxlibs = 20;
 const int maxnodes = 100;
 unsigned fireentid[maxlibs][maxnodes];
-
-extern int propmodelidx[propcap];
-
-bool bCustomAngles = false;
-bool has_env_sun = false;
 
 //const int spotcap = 99;
 //Vector spotorg[spotcap];
@@ -79,14 +74,22 @@ bool has_env_sun = false;
 Vector vecZero( 0.0f, 0.0f, 0.0f );
 Vector EnvSunAngles;
 
+bool has_env_sun = false;
+Vector  vecLightEnvOrigin;
+
+float TotalCloudArea=0;
+Vector cumulRGB = vecZero;
+bool bPredictionPass = true;
+Vector SunRGB;
+
 float fFireNearbyEps = 70;
 float fBulbNearbyEps = 60;
 float fFluorNearbyEps = 54;
-float fNozzleNearbyEps = 40;// maybe even less
-float fRelocNearbyEps = 40;
+float fNozzleNearbyEps = 50;// maybe even less
 
-extern float RGBintensity( Vector color );
-extern bool Axial( float angle );
+int iFirstFreeCloudlight=0;
+
+float fAmbientIntensity = 0;
 
 
 enum
@@ -134,10 +137,10 @@ int vertexref[MAX_MAP_VERTS];
 int *vertexface[MAX_MAP_VERTS];
 faceneighbor_t faceneighbor[MAX_MAP_FACES];
 
-static directlight_t *gSkyLight = NULL;
+static directlight_t *gSunLight = NULL;
 static directlight_t *gAmbient = NULL;
 
-const int cloudcount = 500;
+const int cloudcount = 200;
 static directlight_t *gCloud[cloudcount] = {NULL};
 
 //==========================================================================//
@@ -1065,7 +1068,7 @@ void AddDLightToActiveList( directlight_t *dl )
 
 void FreeDLights()
 {
-	gSkyLight = NULL;
+	gSunLight = NULL;
 	gAmbient = NULL;
 
 	directlight_t *pNext;
@@ -1127,7 +1130,6 @@ int LightForKey (entity_t *ent, char *key, Vector& intensity )
 
 int LightForString( char *pLight, Vector& intensity )
 {
-	float GammaCorrect( float val, float gamma );
 	double r, g, b, scaler;
 	int argCnt;
 
@@ -1160,7 +1162,7 @@ int LightForString( char *pLight, Vector& intensity )
 	}
 	
 	
-	intensity[0] = pow( r / 255.0f, 2.2 ) * 255;				// 2.2 = convert to linear
+	intensity[0] = pow( r / 255.0f, 2.2 ) * 255;	// 2.2 = convert to linear
 
 
 	switch( argCnt)
@@ -1173,10 +1175,8 @@ int LightForString( char *pLight, Vector& intensity )
 		case 3:
 		case 4:
 			// Save the other two G,B values.
-			
-			
 			intensity[1] = pow( g / 255.0f, 2.2 ) * 255;
-			intensity[2] = pow( b / 255.0f, 2.2 ) * 255;		
+			intensity[2] = pow( b / 255.0f, 2.2 ) * 255;	
 			
 			// Did we also get an "intensity" scaler value too?
 			if ( argCnt == 4 )
@@ -1187,12 +1187,12 @@ int LightForString( char *pLight, Vector& intensity )
 			break;
 
 		default:
-			printf("unknown light specifier type - %s (%i digits)\n",pLight, argCnt);
+			printf("unknown light specifier type:   %s (%i digits)\n",pLight, argCnt);
 			return false;
 	}
 
 	// scale up source lights by scaling factor
-	VectorScale( intensity, lightscale * g_fLightIntensityScale, intensity );//not scaler or gamma just some bs, ignore
+	VectorScale( intensity, lightscale, intensity );//not scaler or gamma just some bs, ignore
 
 	return true;
 }
@@ -1201,14 +1201,14 @@ int LightForString( char *pLight, Vector& intensity )
 // Various parsing methods
 //-----------------------------------------------------------------------------
 
-static void ParseLightGeneric( entity_t *e, directlight_t *dl, Vector angles )
+static void ParseLightGeneric( entity_t *e, directlight_t *dl, Vector customangles )
 {
 //	Msg("\nParseLightGeneric\n");
 	entity_t		*e2;
 	char	        *target;
 	Vector	        dest,tmp;
 
-//	Warning( "ParseLightGeneric received %f %f %f\n", angles[0],angles[1],angles[2] );
+//	Warning( "ParseLightGeneric received %f %f %f\n", customangles[0],customangles[1],customangles[2] );
 	dl->light.style = (int)FloatForKey (e, "style");
 	
 	// get intensity
@@ -1222,7 +1222,7 @@ static void ParseLightGeneric( entity_t *e, directlight_t *dl, Vector angles )
 	
 	// check angle, targets
 	target = ValueForKey (e, "target");
-	if( target[0] && !g_bSkipFakeLights )
+	if( target[0] )
 	{	// point towards target
 		e2 = FindTargetEntity (target);
 		if (!e2)
@@ -1238,35 +1238,32 @@ static void ParseLightGeneric( entity_t *e, directlight_t *dl, Vector angles )
 	else
 	{	
 		// point down angle
-		//Vector angles;
 		float pitch, angle;
-
-		if( angles.Length()!=NULL )  //  bCustomAngles )
+		Vector angles;
+		
+//		BUGBUG:  dont use vec3_invalid, it doesn't work!
+		if( customangles.IsValid() )
 		{
-//			Warning( "light has custom angles\n" );
-			pitch = angles[0];
-			angle = angles[1];
-//			 printf( "ParseLightGeneric: angles %.f %.f %.f, custom pitch %.f custom angle %.f\n", angles.x,angles.y,angles.z, pitch,angle );
+//			Warning( "valid angles pitch %.f angle %.f\n", customangles.x, customangles.y );
+			pitch = customangles[0];
+			angle = customangles[1];
 		}		
 		else
 		{
-//			Msg( "light angles: old path\n" );
+//			Warning( "invalid angles pitch %.f angle %.f\n", customangles.x, customangles.y );
 			GetVectorForKey( e, "angles", angles );
 			pitch = FloatForKey (e, "pitch");
 			angle = FloatForKey (e, "angle");
-//			 printf( "ParseLightGeneric: angles %.f %.f %.f, pitch %.f angle %.f\n", angles.x,angles.y,angles.z, pitch,angle );
 		}
 		
-		
+		//  "angles" is fallback, usually ignored
 		SetupLightNormalFromProps( QAngle( angles.x, angles.y, angles.z ), angle, pitch, dl->light.normal );
 	}
-//	printf("lightnormal %f %f %f\n", dl->light.normal.x, dl->light.normal.y, dl->light.normal.z );
 
 	if ( g_bHDR )
 		VectorScale( dl->light.intensity, 
 					 FloatForKeyWithDefault( e, "_lightscaleHDR", 1.0 ),
 					 dl->light.intensity );
-//	Msg("ParseLightGeneric ends\n");
 }
 
 static void SetLightFalloffParams( entity_t * e, directlight_t * dl )
@@ -1329,14 +1326,6 @@ static void SetLightFalloffParams( entity_t * e, directlight_t * dl )
 				}
 			}
 		}
-		
-		
-		// scale intensity for unit 100 distance
-		float ratio = ( dl->light.constant_attn + 100 * dl->light.linear_attn + 100 * 100 * dl->light.quadratic_attn );
-		if ( ratio > 0 )
-		{
-			VectorScale( dl->light.intensity, ratio, dl->light.intensity );
-		}
 	}
 	else
 	{
@@ -1363,24 +1352,9 @@ static void SetLightFalloffParams( entity_t * e, directlight_t * dl )
 		float ratio = ( dl->light.constant_attn + 100 * dl->light.linear_attn + 100 * 100 * dl->light.quadratic_attn );
 		if ( ratio > 0 )
 		{
-/*
-			if( g_bOperateInIntensity )
-			{
-				ratio *= RGBintensity(dl->light.intensity);
-				VectorNormalize(dl->light.intensity);
-			}
-*/
 			VectorScale( dl->light.intensity, ratio, dl->light.intensity );
 		}
 	}
-}
-
-float RGBintensity( Vector color )
-{
-	Vector DesatCoefs( 0.299, 0.587, 0.114 );
-
-	Vector tmp = color * color * DesatCoefs;
-	return sqrt( tmp[0]+tmp[1]+tmp[2] );
 }
 
 float GammaCorrect( float val, float gamma )
@@ -1388,21 +1362,23 @@ float GammaCorrect( float val, float gamma )
 	return pow( val / 255.f, gamma ) * 255.f;
 }
 
-/*Vector IntToRGB(int hexValue)
+float RGBintensity( Vector color )
 {
-  float r = (hexValue >> 8) & 0xFF;  // Extract the RR byte
-  float g = (hexValue >> 4) & 0xFF;   // Extract the GG byte
-  float b = (hexValue) & 0xFF;        // Extract the BB byte
+	Vector DesatCoefs( 0.2126f, 0.7152f, 0.0722f );
 
-  return Vector( r, g, b ); 
-}*/
+	Vector tmp;
+	tmp = color * color * DesatCoefs;
+
+	return sqrt( tmp[0]+tmp[1]+tmp[2] );
+}
+
 
 static void ParseLightSpot( entity_t* e, directlight_t* dl, Vector customorg, Vector propang, bool bFluor, float scaler )
 {
 	if (g_bSkipSpotlights)
 		return;
 
-	// printf( "Light ang %.f %.f %.f\n", propang.x, propang.y, propang.z );
+//			printf( "Light ang %.f %.f %.f\n", propang.x, propang.y, propang.z );
 
 	Vector dest;
 
@@ -1410,11 +1386,16 @@ static void ParseLightSpot( entity_t* e, directlight_t* dl, Vector customorg, Ve
 
 	dl = AllocDLight( dest, true );
 
-/*	if( g_bSkipFakeLights )
+	// correct angles break Valve's artistic intent
+	if(  g_bLightingFixes  &&  !( (int)propang[0] % 90 )  )
 		ParseLightGeneric( e, dl, propang );
-	else  */
-		ParseLightGeneric( e, dl, NULL );
-	//Msg( "normal %.2f %.2f %.2f\n", dl->light.normal.x,dl->light.normal.y,dl->light.normal.z );
+	else
+	{
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		ParseLightGeneric( e, dl, invalidangles );
+	}
+
 
 	dl->light.type = emit_spotlight;
 	dl->light.stopdot = FloatForKey (e, "_inner_cone");
@@ -1423,29 +1404,32 @@ static void ParseLightSpot( entity_t* e, directlight_t* dl, Vector customorg, Ve
 
 	dl->light.stopdot2 = FloatForKey (e, "_cone");
 
-	if( g_bSkipFakeLights )
+	if( g_bLightingFixes && bFluor )
 	{	
-		if( bFluor )//all lightpanels including omni
-		{	
-//			float ratio = dl->light.stopdot2/90;
-//			dl->light.stopdot2=90;
-//			dl->light.intensity *= ratio*ratio;
-
-			if(scaler) dl->light.intensity *= scaler;
-
-			if( customorg.Length() ) dl->light.origin = customorg;
-
-			//Warning("numlights %.2f\n", numlights );
+		if(scaler)
+		{
+			dl->light.intensity *= scaler;//redundant, testing
+		//	printf("lightspot scaler %.3f, intensity after scaler %.3f %.3f %.3f\n", scaler, dl->light.intensity[0],dl->light.intensity[1],dl->light.intensity[2] );
+		//	dl->light.stopdot *= sqrt(scaler);
+		//	dl->light.stopdot2 *= sqrt(scaler);
 		}
+		if( customorg.Length() )
+			dl->light.origin = customorg;
 	}
 
-	if(g_bForceTexlights)
-		dl->light.stopdot = dl->light.stopdot2 = 80;
+	if( g_bForceTexlights )
+	{
+		dl->light.stopdot = dl->light.stopdot2 = 90;
+		dl->light.constant_attn=dl->light.linear_attn=0;
+		dl->light.quadratic_attn=1;
+		dl->light.exponent=0;
+	}
 
 	if (!dl->light.stopdot2) 
 		dl->light.stopdot2 = dl->light.stopdot;
-	if (dl->light.stopdot2 < dl->light.stopdot)  //  2 is outer?
-		dl->light.stopdot2 = dl->light.stopdot;	
+	if (dl->light.stopdot2 < dl->light.stopdot)
+		dl->light.stopdot2 = dl->light.stopdot;
+		//  2 is outer?
 
 //	printf("stopdot %.f stopdot2 %.f\n", dl->light.stopdot, dl->light.stopdot2 );
 
@@ -1480,6 +1464,9 @@ static void ParseLightSpot( entity_t* e, directlight_t* dl, Vector customorg, Ve
 	}
 	
 	SetLightFalloffParams(e,dl);
+
+//	printf("lightspot attn  %.3f %.3f %.3f\n", dl->light.linear_attn,dl->light.quadratic_attn,dl->light.constant_attn );
+
 }
 
 // NOTE: This is just a heuristic.  It traces a finite number of rays to find sky
@@ -1513,7 +1500,7 @@ bool CanLeafTraceToSky( int iLeaf )
 	return false;
 }
 
-void BuildVisForLightEnvironment( bool bProcessClouds, int iFirstFree )
+void BuildVisForLightEnvironment( bool bRenderClouds, directlight_t *gCloud )
 {
 	// Create the vis.
 	for ( int iLeaf = 0; iLeaf < numleafs; ++iLeaf )
@@ -1537,20 +1524,14 @@ void BuildVisForLightEnvironment( bool bProcessClouds, int iFirstFree )
 				}
 
 				
-				if( bProcessClouds )
-				{
-					for( int i=iFirstFree;  i<cloudcount && gCloud[i];  i++ )
-					{
-						MergeDLightVis( gCloud[i], dleafs[iLeaf].cluster );
-	//					Msg("merge cloud vis... (cell %i)\n", i );
-					}
-				}
+				if( bRenderClouds )
+					MergeDLightVis( gCloud, dleafs[iLeaf].cluster );
 				else
 				{
-					MergeDLightVis( gSkyLight, dleafs[iLeaf].cluster );
+					MergeDLightVis( gSunLight, dleafs[iLeaf].cluster );
 					MergeDLightVis( gAmbient, dleafs[iLeaf].cluster );
 				}
-				
+
 
 				break;
 			}
@@ -1649,134 +1630,6 @@ void BuildVisForLightEnvironment( bool bProcessClouds, int iFirstFree )
 	}
 }
 
-
-void BuildVisForCloudLight( void )
-{
-	// Create the vis.
-	for ( int iLeaf = 0; iLeaf < numleafs; ++iLeaf )
-	{
-		dleafs[iLeaf].flags &= ~( LEAF_FLAGS_SKY | LEAF_FLAGS_SKY2D );
-		unsigned int iFirstFace = dleafs[iLeaf].firstleafface;
-		for ( int iLeafFace = 0; iLeafFace < dleafs[iLeaf].numleaffaces; ++iLeafFace )
-		{
-			unsigned int iFace = dleaffaces[iFirstFace+iLeafFace];
-			
-			texinfo_t &tex = texinfo[g_pFaces[iFace].texinfo];
-			if ( tex.flags & SURF_SKY )
-			{
-				if ( tex.flags & SURF_SKY2D )
-				{
-					dleafs[iLeaf].flags |= LEAF_FLAGS_SKY2D;
-				}
-				else
-				{
-					dleafs[iLeaf].flags |= LEAF_FLAGS_SKY;
-				}
-								
-				for( int i=0;  i<cloudcount && gCloud[i];  i++ )
-				{
-					MergeDLightVis( gCloud[i], dleafs[iLeaf].cluster );
-	//				printf("." );
-				}
-	//			printf("\n" );
-
-				break;
-			}
-		}
-	}
-	printf("vis merged\n" );
-
-	// Second pass to set flags on leaves that don't contain sky, but touch leaves that
-	// contain sky.
-	byte pvs[MAX_MAP_CLUSTERS / 8];
-
-	int nLeafBytes = (numleafs >> 3) + 1;
-	unsigned char *pLeafBits = (unsigned char *)stackalloc( nLeafBytes * sizeof(unsigned char) );
-	unsigned char *pLeaf2DBits = (unsigned char *)stackalloc( nLeafBytes * sizeof(unsigned char) );
-	memset( pLeafBits, 0, nLeafBytes );
-	memset( pLeaf2DBits, 0, nLeafBytes );
-
-	for ( int iLeaf = 0; iLeaf < numleafs; ++iLeaf )
-	{
-		// If this leaf has light (3d skybox) in it, then don't bother
-		if ( dleafs[iLeaf].flags & LEAF_FLAGS_SKY )
-			continue;
-
-		// Don't bother with this leaf if it's solid
-		if ( dleafs[iLeaf].contents & CONTENTS_SOLID )
-			continue;
-
-		// See what other leaves are visible from this leaf
-		GetVisCache( -1, dleafs[iLeaf].cluster, pvs );
-
-		// Now check out all other leaves
-		int nByte = iLeaf >> 3;
-		int nBit = 1 << ( iLeaf & 0x7 );
-		for ( int iLeaf2 = 0; iLeaf2 < numleafs; ++iLeaf2 )
-		{
-			if ( iLeaf2 == iLeaf )
-				continue;
-
-			if ( !(dleafs[iLeaf2].flags & ( LEAF_FLAGS_SKY | LEAF_FLAGS_SKY2D ) ) )
-				continue;
-
-			// Can this leaf see into the leaf with the sky in it?
-			if ( !PVSCheck( pvs, dleafs[iLeaf2].cluster ) )
-				continue;
-
-			if ( dleafs[iLeaf2].flags & LEAF_FLAGS_SKY2D )
-			{
-				pLeaf2DBits[ nByte ] |= nBit;
-			}
-			if ( dleafs[iLeaf2].flags & LEAF_FLAGS_SKY )
-			{
-				pLeafBits[ nByte ] |= nBit;
-
-				// As soon as we know this leaf needs to draw the 3d skybox, we're done
-				break;
-			}
-		}
-	}
-
-	// Must set the bits in a separate pass so as to not flood-fill LEAF_FLAGS_SKY everywhere
-	// pLeafbits is a bit array of all leaves that need to be marked as seeing sky
-	for ( int iLeaf = 0; iLeaf < numleafs; ++iLeaf )
-	{
-		// If this leaf has light (3d skybox) in it, then don't bother
-		if ( dleafs[iLeaf].flags & LEAF_FLAGS_SKY )
-			continue;
-
-		// Don't bother with this leaf if it's solid
-		if ( dleafs[iLeaf].contents & CONTENTS_SOLID )
-			continue;
-
-		// Check to see if this is a 2D skybox leaf
-		if ( pLeaf2DBits[ iLeaf >> 3 ] & (1 << ( iLeaf & 0x7 )) )
-		{
-			dleafs[iLeaf].flags |= LEAF_FLAGS_SKY2D;
-		}
-
-		// If this is a 3D skybox leaf, then we don't care if it was previously a 2D skybox leaf
-		if ( pLeafBits[ iLeaf >> 3 ] & (1 << ( iLeaf & 0x7 )) )
-		{
-			dleafs[iLeaf].flags |= LEAF_FLAGS_SKY;
-			dleafs[iLeaf].flags &= ~LEAF_FLAGS_SKY2D;
-		}
-		else
-		{
-			// if radial vis was used on this leaf some of the portals leading
-			// to sky may have been culled.  Try tracing to find sky.
-			if ( dleafs[iLeaf].flags & LEAF_FLAGS_RADIAL )
-			{
-				if ( CanLeafTraceToSky(iLeaf) )
-				{
-					// FIXME: Should make a version that checks if we hit 2D skyboxes.. oh well.
-					dleafs[iLeaf].flags |= LEAF_FLAGS_SKY;
-				}
-			}
-		}
-	}
-}
 
 
 static char *ValueForKeyWithDefault (entity_t *ent, char *key, char *default_value = NULL)
@@ -1806,36 +1659,38 @@ static char *SkyboxBitmap( void )
 
 static void ParseLightEnvironment( entity_t* e, directlight_t* dl )
 {
-	if( g_bSkipSun )
-		return;
-
+	extern Vector cumulRGB;
 	Vector dest;
 	GetVectorForKey (e, "origin", dest );
 	dl = AllocDLight( dest, false );
 //  dl is NOT an entire structure!
 //  dl is a current cell for this exact light only!
 //  make sure not to overwrite this dl!
-	
-//	if( g_bSkipFakeLights )  //  && strcmp( pSkyboxBasename,"sky_day01_01_hdr" ) )
-//		ParseLightGeneric( e, dl, Vector(20, yawend, 0) );
-//	else
 
-		ParseLightGeneric( e, dl, NULL );
+
+	Vector invalidangles;
+	invalidangles.Invalidate();
+	if(  g_bLightingFixes  &&  ( EnvSunAngles[0] || EnvSunAngles[1] )  )
+		ParseLightGeneric( e, dl, EnvSunAngles );
+	else
+		ParseLightGeneric( e, dl, invalidangles );
+
+	
 
 	char *angle_str=ValueForKeyWithDefault( e, "SunSpreadAngle" );
 	if (angle_str)
 	{
 		g_SunAngularExtent=atof(angle_str);
 		g_SunAngularExtent=sin((M_PI/180.0)*g_SunAngularExtent);
-		printf("sun extent from map=%f\n",g_SunAngularExtent);
+//		printf("sun extent from map=%f\n",g_SunAngularExtent);
 	}
 
-	if ( gSkyLight )
+	if ( gSunLight )
 		return;
 	
-	// Sky light.
-	dl->light.type = emit_skylight;
-	gSkyLight = dl;					
+	// Sun light
+	dl->light.type = emit_sunlight;
+		gSunLight = dl;					
 
 	// Sky ambient light.
 	gAmbient = AllocDLight( dl->light.origin, false );
@@ -1856,129 +1711,178 @@ static void ParseLightEnvironment( entity_t* e, directlight_t* dl )
 					 gAmbient->light.intensity );
 	}
 
-	bool bProcessClouds=false;
-	BuildVisForLightEnvironment( bProcessClouds, NULL );
+	//  renormalize sunlight and skylight to compensate for added cloudlight energy
+	if( g_bCloudlight )
+	{
+		// clouds illuminate about half of all surfs, same for the sun, and sky illuminates everything
+		// cloudlight is already rendered at this point
+//		float SkyboxArea = (2*180*180)/M_PI; //  2*Pi*r*r, r=180/Pi
+//		cumulRGB *= TotalCloudArea / SkyboxArea;
+//		float preserve =  0.5*RGBintensity(dl->light.intensity) + RGBintensity(gAmbient->light.intensity) ;
+		float preserve =  RGBintensity(dl->light.intensity) + RGBintensity(gAmbient->light.intensity) ;
+		float ratio = RGBintensity(cumulRGB) / preserve;
+		ratio = 1 - ratio;
+		VectorScale( gAmbient->light.intensity, ratio, gAmbient->light.intensity );
+		VectorScale( dl->light.intensity, ratio, dl->light.intensity );
+	}
+
+
+	BuildVisForLightEnvironment( false, NULL );
 
 	// Add sky and sky ambient lights to the list.
-	AddDLightToActiveList( gSkyLight );
+	AddDLightToActiveList( gSunLight );
 	AddDLightToActiveList( gAmbient );
 	
+	fAmbientIntensity = RGBintensity( gAmbient->light.intensity );
+	printf("ambient intensity for displacements: %.f\n", fAmbientIntensity );
 }
 
-static void ParseCloudLight( entity_t* e, directlight_t* dl, float pitch, float start, float end, float step, Vector CloudRGB )
+static void ParseCloudlight( entity_t* e, directlight_t* dl, float pitch, float start, float end, float step, Vector CloudRGB )
 {
 	if(step==0)
 	{
 		Warning("illegal step value %.3f\n", step );
 		return;
 	}
+
 	step=fabs(step);
-	float spread=step;
 	step=max(step, 4.f);
-	start+=step;
-	end-=step;
-	float predict = ceil( (end-start)/step );
-	if( g_bDebugClouds )
-		printf("%.f cloud lights at pitch %.f\n", predict, pitch );
-	Vector AmbientRGB;
-	if( g_bHDR && LightForKey( e, "_ambientHDR", AmbientRGB ) )	{}
-	else LightForKey( e, "_ambient", AmbientRGB );  //  get ambient in 2.2 gamma
-	VectorScale(CloudRGB, lightscale, CloudRGB);
+	start+=step;/*vert extent is 2xStep*/	end-=step;
+	float LightsOnTheLine = 0;
+	float YawExtent, PitchExtent;
+	float area;
 
-//	for(int i=0; i<2; i++ )
-//		AmbientRGB[i]=GammaCorrect(AmbientRGB[i], 1.f/2.2f);
-//	for(int i=0; i<2; i++ )
-//		CloudRGB[i]=GammaCorrect(CloudRGB[i], 2.2f);  //  get cloud in 2.2 gamma
-	float targetint = max( 0, RGBintensity(CloudRGB)-RGBintensity(AmbientRGB) );
-	VectorScale( CloudRGB, targetint / RGBintensity(CloudRGB), CloudRGB );  //  subtract ambient
+	PitchExtent = 2*step;
+	YawExtent = end-start;  //  angular extent value (0..180) i.e. full angle
+	area = YawExtent*PitchExtent;
 
-
-	CloudRGB /= predict;
-
-	float yaw=start;
-	int iFirstFree=0;
-	
-	for(int i=0; i<cloudcount; i++)
-	{
-		if(  !gCloud[i]  )
-		{
-			iFirstFree=i;
-			break;
-		}
-	}
-
-	for(int i=iFirstFree; i<cloudcount; i++)
+	if( bPredictionPass )
 	{	
-		gCloud[i] = AllocDLight( vecZero, false );
-		gCloud[i]->light.type = emit_skylight;
-		gCloud[i]->light.radius = sin((M_PI/180.0)*spread);
-
-		if( g_bDebugClouds )
+		for(int i=0; i<3; i++)
+			CloudRGB[i] = GammaCorrect( CloudRGB[i], 2.2f );
+		TotalCloudArea += area;//LightsOnTheLine;
+		cumulRGB += area * CloudRGB;
+//		printf("predict %.f cloudlight steps on a line\n", LightsOnTheLine );
+		if( YawExtent > 180 )
 		{
-			/*debug*/gCloud[i]->light.type = emit_point;
-			/*debug*/gCloud[i]->light.radius=1000;  //  sin( (yaw-start)*M_PI*10 )*4096;
-			/*debug*/AngleVectors( QAngle( pitch, yaw, 0), &gCloud[i]->light.origin );
-			/*debug*/gCloud[i]->light.origin *= 25000;
-			/*debug*/gCloud[i]->light.origin.x -=2500;
-			/*debug*/gCloud[i]->light.origin.y -=1800;
-//			/*debug*/gCloud[i]->light.origin.z +=1000;
+			char *skyname = SkyboxBitmap();
+			Warning("cloud Angular Extent (%.f) > 180 !! (skyname %s)\n", YawExtent, skyname );
 		}
-			
-		ParseLightGeneric( e, gCloud[i], Vector(pitch, yaw+180, NULL) );
-		VectorCopy(CloudRGB, gCloud[i]->light.intensity );
-		if( g_bDebugClouds )
-			Msg("light %i alloc: pitch %.f yaw %.f\n", i+1, pitch, yaw);
-
-		yaw += step;
-		if( yaw>end )
-			break;
+		return;
 	}
-
-	bool bProcessClouds=true;
-	BuildVisForLightEnvironment( bProcessClouds, iFirstFree );
-
-
-	printf("add Cloudlight ");
-	for( int i=iFirstFree; i<cloudcount && gCloud[i]; i++ )
+	else
 	{
-		AddDLightToActiveList( gCloud[i] );
-		printf("%i ", i);
-	}
-	printf("to active list...\n");
-
+		for(int i=0; i<3; i++)
+			CloudRGB[i] = GammaCorrect( CloudRGB[i], 2.2f );
+		CloudRGB *= area/TotalCloudArea;//  RGBintensity(cumulRGB)/(area*RGBintensity(CloudRGB));
+//		printf("cloudlight adds %.f cloud int...\n", RGBintensity(CloudRGB) );
 		
+		cumulRGB += CloudRGB;
+	}
 
+	gCloud[iFirstFreeCloudlight] = AllocDLight( vecLightEnvOrigin, false );
+	gCloud[iFirstFreeCloudlight]->light.type = emit_sunlight;
+	PitchExtent = sin((M_PI/180.0)*step);
+	YawExtent = sin(  (M_PI/180.0) * YawExtent  );
+//	printf("sun extent from map=%f\n", YawExtent );
+	gCloud[iFirstFreeCloudlight]->light.stopdot = PitchExtent;  //  hack
+	gCloud[iFirstFreeCloudlight]->light.stopdot2 = YawExtent;  //  hack
+
+	ParseLightGeneric( e, gCloud[iFirstFreeCloudlight], Vector(pitch, AVG(start,end)+180, NULL) );
+	VectorCopy(CloudRGB, gCloud[iFirstFreeCloudlight]->light.intensity );
+
+	BuildVisForLightEnvironment( true, gCloud[iFirstFreeCloudlight] );
+	printf("cloudlight %i merged to DLightVis\n", iFirstFreeCloudlight );
+	AddDLightToActiveList( gCloud[iFirstFreeCloudlight] );
 	
+	//printf("cloudlight added, %i Cloudlights in active list\n", iFirstFreeCloudlight+1 );
+	iFirstFreeCloudlight++;
+
+	if(  !g_bDebugClouds  )
+		return;
+
+
+//	if( g_bDebugClouds )
+//		printf("%.f cloud lights at pitch %.f\n", LightsOnTheLine, pitch );
+	
+	//  r_drawlights -1
+	LightsOnTheLine = ceil( (end-start)/step );
+	Vector invalidangles;
+	invalidangles.Invalidate();
+	for(int i=0; i<LightsOnTheLine; i++ )
+	{
+		if(  !g_bDebugClouds  )
+			break;
+
+		int j = i + iFirstFreeCloudlight;
+		gCloud[j] = AllocDLight( vecZero, false );
+		gCloud[j]->light.type = emit_point;
+	    gCloud[j]->light.radius=1000;
+	    AngleVectors( QAngle( pitch, start+i*step, 0), &gCloud[j]->light.origin );// dont add 180 to yaw, it works
+	    gCloud[j]->light.origin *= 25000;
+		ParseLightGeneric( e, gCloud[j], invalidangles );
+		gCloud[j]->light.intensity = vecZero;
+		AddDLightToActiveList( gCloud[j] );
+	}
+	if(  g_bDebugClouds  )
+	{
+		iFirstFreeCloudlight+=LightsOnTheLine;
+		printf("%.f cloudlights added, %i Cloudlights in active list\n", LightsOnTheLine, iFirstFreeCloudlight );
+	}
 }
 
-static void ParseLightPoint( entity_t* e, directlight_t* dl, Vector customorg, float numlights )
+static void ParseLightPoint( entity_t* e, directlight_t* dl, Vector customorg, float numlights, bool bCustomRGB )
 {
-	if (g_bSkipPointlights)
+	if(  g_bSkipPointlights  )
 		return;
 
 	Vector dest;
 	GetVectorForKey (e, "origin", dest );
-	char *pTargetname;
-	pTargetname = "noname";
-	pTargetname=ValueForKey(e, "targetname");
+//	char *pTargetname = "noname";
+//	pTargetname=ValueForKey(e, "targetname");
 
 	dl = AllocDLight( dest, true );
-
-	ParseLightGeneric( e, dl, NULL );
+	
+	Vector invalidangles;
+	invalidangles.Invalidate();
+	ParseLightGeneric( e, dl, invalidangles );
 
 	dl->light.stopdot = FloatForKey (e, "_inner_cone");
 	dl->light.stopdot2 = FloatForKey (e, "_cone");
 
 	//  bulbs and FIRES
+	if( bCustomRGB && !dl->light.style )  //  lightstyles dont work with switchable lights
+		dl->light.style = 12;  //  fire lightstyle
+	if( bCustomRGB )
 	{
-//	printf("PLP: custom XYZ %.3f %.3f %.3f\n", customorg.x, customorg.y, customorg.z );
-//	Msg("pointlight intensity from %.3f to ", RGBintensity(dl->light.intensity)  );
+//		printf( "applying custom RGB to %.f lights\n", numlights );
+		dl->light.intensity = Vector(253, 173, 107);
+		
+		double scaler, scaler_hdr, GARB;
+		int argCnt;
+		char *pLight = ValueForKey( e, "_light" );
+		scaler = scaler_hdr = GARB = 0;
+		argCnt = sscanf ( pLight, "%lf %lf %lf %lf %lf %lf %lf %lf", 
+						  &GARB,&GARB,&GARB, &scaler, &GARB,&GARB,&GARB, &scaler_hdr );
+
+		for(int i=0; i<3; i++)
+			dl->light.intensity[i] = (136.f/169.f) * GammaCorrect( dl->light.intensity[i], 2.2f );
+
+		if (argCnt==8) 		// 2 4-tuples
+		{
+			if (g_bHDR)
+				scaler=scaler_hdr;
+			argCnt=4;
+		}
+		if ( argCnt == 4 )
+			// Scale the normalized 0-255 R,G,B values by the intensity scaler
+			VectorScale( dl->light.intensity, scaler / 255.0, dl->light.intensity );
+	}
 	if( numlights )
-		dl->light.intensity *= 1/numlights;
+		dl->light.intensity /= numlights;
+
 	if( customorg.Length() )
 		dl->light.origin = customorg;
-//	Msg( "%.3f\n", RGBintensity(dl->light.intensity)  );
-	}
 
 	dl->light.type = emit_point;
 
@@ -2021,8 +1925,6 @@ float FloatForId( unsigned num, char *key )
 
 void CreateFirelibs( entity_t* e )
 {
-	printf( "constructing fire libraries...\n" );
-
 	unsigned i;
 	const int cnt = 500;
 	unsigned named[ cnt ], unnamed [ cnt ];
@@ -2225,8 +2127,19 @@ void CreateFirelibs( entity_t* e )
 
 }
 
+
+
 void CreatePropDynLibs( entity_t* e )
 {
+	#define PROPTYPE_UNKNOWN 0;
+	#define PROPTYPE_BULB 1;
+	#define PROPTYPE_FLUOR 2;
+	#define PROPTYPE_OMNIFLUOR 3;
+	#define PROPTYPE_NOZZLE 4;
+	#define PROPTYPE_NOTADEVICE 5;
+	
+	int iPropType;
+
 	unsigned i;
 	char *pModel;
 	char *tmp;
@@ -2237,96 +2150,178 @@ void CreatePropDynLibs( entity_t* e )
 		e = &entities[i];
 		name = ValueForKey (e, "classname");
 		if( !strcmp( name,"prop_dynamic" )
-			|| !strcmp( name,"prop_dynamic_override" )
-			|| !strcmp( name,"prop_physics_override" ) )
+		|| !strcmp( name,"prop_dynamic_override" )
+		|| !strcmp( name,"prop_physics_override" ) )
 		{	
 			// printf("prop_dynamic found\n");
 			pModel=ValueForKey( e, "model" );
+			iPropType=PROPTYPE_UNKNOWN;
 
 			//bulbs
 			for( tmp=pModel; *tmp && *tmp!='.'; tmp++ )
 			{
 				if( !strnicmp( tmp,"light_domelight02_on", 20 ) )
 				{
-					iBulb++;
-
-					GetVectorForKey( e, "origin", bulbproporg[iBulb] );
-					GetVectorForKey( e, "angles", bulbpropang[iBulb] );
-					bulbpropang[iBulb].Invalidate();
+					
+					GetVectorForKey( e, "origin", BulbOrg[nBulb] );
+					GetVectorForKey( e, "angles", BulbAngles[nBulb] );
+					BulbAngles[nBulb].Invalidate();
 					
 					printf( "dynamic: bulb %i %s pos %.f %.f\n",
-						iBulb, tmp, bulbproporg[iBulb].x, bulbproporg[iBulb].y );
+						nBulb, tmp, BulbOrg[nBulb].x, BulbOrg[nBulb].y );
+
+					iPropType=PROPTYPE_BULB;
+					nBulb++;
+
 					break;
 				}
 			}
+			if( iPropType )  continue;
 			
 			//fluors
 			for( tmp=pModel; *tmp && *tmp!='.'; tmp++ )
 			{
 				// printf( "model pointer %s\n", tmp );
 				if( !strnicmp( tmp,"fluorescent",11 )
-					|| !strnicmp( tmp,"florescent",10 )
-					|| !strnicmp( tmp,"flourescent",11 )
-					|| !strnicmp( tmp,"prison_cellwindow002a",21 )
-					|| !strcmp( tmp,"lab_flourescentlight001b.mdl" ) )
+				|| !strnicmp( tmp,"florescent",10 )
+				|| !strnicmp( tmp,"flourescent",11 )
+				|| !strnicmp( tmp,"prison_cellwindow002a",21 )
+				|| !strcmp( tmp,"lab_flourescentlight001b.mdl" ) )
 				{
-					iFluor++;
-
-					GetVectorForKey( e, "origin", fluorproporg[iFluor] );
-					GetVectorForKey( e, "angles", fluorpropang[iFluor] );
+					
+					GetVectorForKey( e, "origin", FluorOrg[nFluor] );
+					GetVectorForKey( e, "angles", FluorAngles[nFluor] );
 
 					if( !strnicmp( tmp,"flourescentlight001b",20 )
 						|| !strcmp( tmp,"lab_flourescentlight001b.mdl" ) )
 					{
-						fluorproporg[iFluor].z -= 73+2;
-						fluorpropang[iFluor].z = 40;
+						FluorOrg[nFluor].z -= 73+2;
+						FluorAngles[nFluor].z = 40;
 					}
 
 					if( !strnicmp( tmp,"prison_cellwindow002a",21 ) )
-						fluorpropang[iFluor].z = 123;//hack to keep nearby light portraying skylight
+						FluorAngles[nFluor].z = 123;//hack to keep nearby light portraying skylight
 
 					printf( "dynamic: fluor %i %s pos %.f %.f\n",
-						iFluor, tmp, fluorproporg[iFluor].x, fluorproporg[iFluor].y );
+						nFluor, tmp, FluorOrg[nFluor].x, FluorOrg[nFluor].y );
+
+					iPropType=PROPTYPE_FLUOR;
+					nFluor++;
+
 					break;
 				}	
 			}
+			if( iPropType )  continue;
+
+
+			//  omnifluors
+			for( tmp=pModel; *tmp && *tmp!='.'; tmp++ )
+			{
+				if( !strnicmp( tmp,"lab_flourescentlight002b", 24 )
+				|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
+				{
+					
+					GetVectorForKey( e, "origin", OmnifluorOrg[nOmnifluor] );
+					GetVectorForKey( e, "angles", OmnifluorAngles[nOmnifluor] );
+
+					// tweaks
+					if( !strnicmp( tmp,"lab_flourescentlight002b", 24 )
+					|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
+					{
+						Vector fwd;
+						AngleVectors( QAngle( OmnifluorAngles[nOmnifluor][0],OmnifluorAngles[nOmnifluor][1],OmnifluorAngles[nOmnifluor][2] ), &fwd );
+						VectorMA( OmnifluorOrg[nOmnifluor], 2, fwd, OmnifluorOrg[nOmnifluor] );
+					}
+					else
+					{
+						OmnifluorAngles[nOmnifluor].Invalidate();
+					}
+
+					printf( "dynamic: omnifluor %i %s pos %.f %.f\n",
+						nOmnifluor, tmp, OmnifluorOrg[nOmnifluor].x, OmnifluorOrg[nOmnifluor].y );
+
+					iPropType=PROPTYPE_OMNIFLUOR;
+					nOmnifluor++;
+
+					break;
+				}
+			}
+			if( iPropType )  continue;
+
 			
 			//nozzles
 			for( tmp=pModel; *tmp && *tmp!='.'; tmp++ )
 			{
 				if( !strnicmp( tmp,"light_spotlight01_base",22 )
-					|| !strnicmp( tmp,"light_spotlight02_base",22 )
-					|| !strnicmp( tmp, "lamppost03a_off",15 ) )	break;
+				|| !strnicmp( tmp,"light_spotlight02_base",22 )
+				|| !strnicmp( tmp, "lamppost03a_off",15 ) )	break;
 				
 				if(	!strnicmp( tmp,"prison_lamp001a",15 )
-					|| !strnicmp( tmp,"prison_lamp001b",15 )
-					 || !strnicmp( tmp,"prison_lamp001c",15 )
-					 || !strnicmp(tmp,"LampFixture01a",14)
-					|| !strnicmp( tmp, "walllight", 9 ) // eli's opposite sides' lamp
-					|| !strnicmp( tmp, "combine_light", 13 )
-					|| !strnicmp( tmp, "light_spotlight01_lamp", 22 ) 
-					|| !strcmp( tmp,"light_spotlight02_lamp.mdl" )
-					|| !strnicmp( tmp, "lamp_bell_on", 12 )
-					|| !strnicmp( tmp, "light_decklight01_on", 20 )
-					|| !strnicmp( tmp, "combine_intmonitor001", 21 ) )
+				|| !strnicmp( tmp,"prison_lamp001b",15 )
+				|| !strnicmp( tmp,"prison_lamp001c",15 )
+				|| !strnicmp(tmp,"LampFixture01a",14)
+				|| !strnicmp( tmp, "walllight", 9 ) // eli's opposite sides' lamp
+				|| !strnicmp( tmp, "combine_light", 13 )
+				|| !strnicmp( tmp, "light_spotlight01_lamp", 22 ) 
+				|| !strcmp( tmp,"light_spotlight02_lamp.mdl" )
+				|| !strnicmp( tmp, "lamp_bell_on", 12 )
+				|| !strnicmp( tmp, "light_decklight01_on", 20 )
+				|| !strnicmp( tmp, "combine_intmonitor001", 21 ) )
 				{
-					iNozzle++;
-
-					GetVectorForKey( e, "origin", nozzleproporg[iNozzle] );
-					GetVectorForKey( e, "angles", nozzlepropang[iNozzle] );
+					
+					GetVectorForKey( e, "origin", NozzleOrg[nNozzle] );
+					GetVectorForKey( e, "angles", NozzleAngles[nNozzle] );
 					
 					if( !strcmp( tmp, "combine_intmonitor001.mdl" ) )
-						nozzleproporg[iNozzle].z += 24;
+						NozzleOrg[nNozzle].z += 24;
 					else if( !strcmp( tmp,"light_spotlight01_lamp.mdl" ) )
-						nozzlepropang[iNozzle].x *= -1;
+						NozzleAngles[nNozzle].x *= -1;
 					/*else if( !strcmp( tmp,"light_spotlight02_lamp.mdl" ) )
 					{
-						nozzlepropang[iNozzle].x *= -1;
-						nozzlepropang[iNozzle].y += -180;
+						NozzleAngles[nNozzle].x *= -1;
+						NozzleAngles[nNozzle].y += -180;
 					}*/
 
 					printf( "dynamic: nozzle %i %s pos %.f %.f\n",
-						iNozzle, tmp, nozzleproporg[iNozzle].x, nozzleproporg[iNozzle].y );
+						nNozzle, tmp, NozzleOrg[nNozzle].x, NozzleOrg[nNozzle].y );
+
+					iPropType=PROPTYPE_NOZZLE;
+					nNozzle++;
+
+					break;
+				}
+			}
+			if( iPropType )  continue;
+
+
+			//  nondevices
+			for( tmp=pModel; *tmp && *tmp!='.'; tmp++ )
+			{
+				if(  !strnicmp( tmp, "prison_cellwindow002a", 21 )//  sewer grate in canals
+				||  
+				!strnicmp( tmp, "vol_light", 9 )//coast03 house
+				)
+				{
+					
+					GetVectorForKey( e, "origin", NotadeviceOrg[nNotadevice] );
+					GetVectorForKey( e, "angles", NotadeviceAngles[nNotadevice] );
+
+					// tweaks
+					  if(  !strnicmp(tmp,"prison_cellwindow002a",21 ) )//hack
+					{
+						NotadeviceOrg[nNotadevice].z += 16;//so we have cool shadows from the grate
+					}
+					else  
+					{
+						NotadeviceAngles[nNotadevice].Invalidate();
+					}
+
+					printf( "dynamic: not a device %i %s pos %.f %.f\n",
+						nNotadevice, tmp, NotadeviceOrg[nNotadevice].x, NotadeviceOrg[nNotadevice].y );
+
+					iPropType=PROPTYPE_NOTADEVICE;
+					nNotadevice++;
+
 					break;
 				}
 			}
@@ -2344,26 +2339,22 @@ bool CheckAgainstFires( entity_t* e, directlight_t* dl, Vector lightpos )
 
 	// cycle by current group till matched
 
-	//printf( "new light to check: %.f %.f\n",lightpos.x,lightpos.y );
+//	printf( "new light to check: %.f %.f\n",lightpos.x,lightpos.y );
 	for( lib=0; lib<maxlibs; lib++ )
 	{
-		//printf( "working in firelib %i\n", lib );
+//		printf( "working in firelib %i\n", lib );
 		for( node=0; node<maxnodes; node++ )
 		{
 			if( !fireentid[lib][node] )
 				break;
-
-//			if( !bInSearch )
-//				continue;
 			
-			//printf( "in search...\n" );
+			//printf( "search...\n" );
 			firepos = VectorForId( fireentid[lib][node],"origin" );
 			dist = ( lightpos - firepos ).Length();
 			if( dist < fFireNearbyEps )
 			{
-				printf( "light %.f %.f  near  lib %i (dist %.f, fire %.f %.f)\n",
-					lightpos.x,lightpos.y, lib, dist,
-					firepos.x,firepos.y );
+//				printf( "light %.f %.f  near  lib %i (dist %.f, fire %.f %.f)\n",
+//					lightpos.x,lightpos.y,		lib,	dist,firepos.x,firepos.y );
 
 				bInSearch = false;
 				for( node; node<maxnodes; node++ )
@@ -2373,60 +2364,48 @@ bool CheckAgainstFires( entity_t* e, directlight_t* dl, Vector lightpos )
 					else
 						break;
 				}
-				if( node==maxnodes )
-				{
+				if( node==maxnodes ){
 					Warning( "exhausted\n" );
-					break;
-				}
-				//Warning( "lib %i, node %i, ent %i\n", lib, node, fireentid[lib][node] );
+					break;}
+//				Warning( "lib %i, node %i, ent %i\n", lib, node, fireentid[lib][node] );
 				break; // not cycling nodes anymore
 			}
 		}
 		
+		if( bInSearch )	continue;
 		
-
-		if( bInSearch )
-			continue;
-		
-		Msg( "light matched lib %i (%i fires)\n",lib, lastused+1 );
-		float step=16;
-		float height=64;
-		float numvert = (height/step)+1;
-		float dimtimes = 4*numvert*(lastused+1);
-		float wide = 24;
-		Vector glpos, renderfirepos;
+		Warning( "light matched lib %i (%i fires)\n",lib, lastused+1 );
+		float step=24;
+		float height=72;
+		float numvert = ceil(height/step);
+		float numinfire = numvert*8;  // lights in one fire
+		float dimtimes = numinfire*(lastused+1); //  new lights to portray one old light
+		float radius = 24;
+		Vector hpos, renderfirepos;
 		for( node=0; node<=lastused; node++ )//for each fire
 		{
 			//Msg( "rendering lib %i, node %i, ent %i\n", lib, node, fireentid[lib][node] );
 
+			renderfirepos = VectorForId( fireentid[lib][node],"origin" );
+	//		printf("fire ent %i at %.f %.f %.f\n", fireentid[lib][node], renderfirepos[0],renderfirepos[1],renderfirepos[2] );
 			for( int j=0; j<=numvert; j++ )
 			{
-				float pos=j*step;
-				//printf( "blurring fire vertically: pos %.f\n", Vector( 0,0,pos ).z );
+				Vector vpos=renderfirepos; vpos[2]+=j*step;	//	printf( "blurring fire vertically: pos %.f\n", vpos[2] );
+				
+				hpos = vpos+Vector(radius,0,0);	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(-radius,0,0);	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(0,radius,0);	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(0,-radius,0);	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
 
-				//printf("pos of fireentid %i\n", fireentid[lib][node] );
-				renderfirepos = VectorForId( fireentid[lib][node],"origin" );
-				VectorAdd( renderfirepos, Vector( 0,0,pos ), glpos );
-
-				glpos += Vector(wide,0,0);
-				ParseLightPoint( e, dl, glpos, dimtimes );
-	//			printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
-
-				glpos += Vector(-wide,0,0);
-				ParseLightPoint( e, dl, glpos, dimtimes );
-	//			printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
-
-				glpos += Vector(0,wide,0);
-				ParseLightPoint( e, dl, glpos, dimtimes );
-	//			printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
-
-				glpos += Vector(0,-wide,0);
-				ParseLightPoint( e, dl, glpos, dimtimes );
-	//			printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				// diagonal
+				hpos = vpos+Vector(0.707,0.707,0)*radius;	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(-0.707,0.707,0)*radius;	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(-0.707,-0.707,0)*radius;	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
+				hpos = vpos+Vector(0.707,-0.707,0)*radius;	ParseLightPoint( e, dl, hpos, dimtimes, true );	//	printf( "fire glpos %.f %.f %.f\n", glpos.x, glpos.y, glpos.z );
 			}
 			fireentid[lib][node]=0;
 
-			Msg( "one light portrays %i fires, each blurred into %.f\n", lastused+1, (numvert+1)*4 );
+			Msg( "cluster of %i fires, each blurred into %.f (original light downscaled %.f times)\n", lastused+1, numinfire, dimtimes );
 		}
 		//lightpos.Invalidate();
 		//printf( "%i lights rendered\n", lastused+1 );
@@ -2434,332 +2413,382 @@ bool CheckAgainstFires( entity_t* e, directlight_t* dl, Vector lightpos )
 	}
 	return false;
 }
-void ProcessBulbs( entity_t* e, directlight_t* dl, Vector dest, int i );
+
+
+bool CheckAgainstMisc( entity_t* e, directlight_t* dl, Vector lightorg )
+{	
+	entity_t* ent;
+	char *classname;
+	Vector org, dist;
+	for (int i=0; i<(unsigned)num_entities ; i++)
+	{
+		ent = &entities[i];
+		classname = ValueForKey( ent, "classname" );
+		if(   strcmp(classname,"ambient_generic")
+			&& strcmp(classname,"env_sound")
+			&& strcmp(classname,"env_sprite")
+			&& strcmp(classname,"env_spark")
+//			&& strcmp(classname,"info_target")
+			&& strnicmp(classname,"item_", 5)  )
+		//  "!strcmp" is match, "strcmp" is no match
+			continue;
+
+		GetVectorForKey( ent, "origin", org );
+		dist = lightorg-org;
+		if( dist.Length() > 64 )
+			continue;
+
+		printf( "light at %.f %.f  with  '%s' at %.f %.f  (dist %.f)\n",
+		lightorg[0], lightorg[1],
+		classname,
+		org[0], org[1],
+		dist.Length() );
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		ParseLightPoint( e, dl, vecZero, NULL, false );
+		printf( "bulb at %.f %.f with '%s' at %.f %.f\n", lightorg.x,lightorg.y, classname, org.x,org.y );
+		return true;
+	}
+	return false;
+}
+
+
+bool CheckAgainstOmnisRenderBoth( entity_t* e, directlight_t* dl, Vector lightorg )
+{	
+	entity_t* ent;
+	char *name;
+	for (int i=0; i<(unsigned)num_entities ; i++)
+	{
+		ent = &entities[i];
+		name = ValueForKey( ent, "classname" );
+		if( strcmp(name,"light") )  //  "!strcmp" is match, "strcmp" is no match
+			continue;
+
+		Vector org;	GetVectorForKey( ent, "origin", org );
+		float dist = ( lightorg-org ).Length();
+		if( dist > 100 )
+			continue;
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		ParseLightSpot( e, dl, vecZero, invalidangles, false, NULL );
+		printf( "light_spot '%s' at %.f %.f  match  light at %.f %.f (dist %.f)  ->  render both\n", ValueForKey( ent, "targetname" ), lightorg.x,lightorg.y, org.x,org.y, dist );
+
+		ParseLightPoint( ent, dl, vecZero, NULL, false );
+
+		// invalidate nearby lightprops as we don't need them anymore
+		for( int i=0; i <= nBulb; i++ )	{
+			if(  !BulbOrg[i].IsValid()  )	continue;
+			if( (BulbOrg[i]-lightorg).Length()>64 )	continue; }
+		for( int i=0; i <= nNozzle; i++ )	{
+			if(  !NozzleOrg[i].IsValid()  )	continue;
+			if( (NozzleOrg[i]-lightorg).Length()>64 )	continue; }
+
+		return true;
+	}
+	return false;
+}
+
+
+bool CheckAgainstBeams( entity_t* e, directlight_t* dl, Vector lightorg )
+{	
+	entity_t* ent;
+	char *name;
+	for (int i=0; i<(unsigned)num_entities ; i++)
+	{
+		ent = &entities[i];
+		name = ValueForKey( ent, "classname" );
+		if( strcmp(name,"point_spotlight") )  //  "!strcmp" is match, "strcmp" is no match
+			continue;
+
+		Vector org;	GetVectorForKey( ent, "origin", org );
+		float dist = ( lightorg-org ).Length();
+		if( dist > 32 )
+			continue;
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		ParseLightSpot( e, dl, vecZero, invalidangles, false, NULL );
+		printf( "lightspot at %.f %.f with beam at %.f %.f\n", lightorg.x,lightorg.y, org.x,org.y );
+		return true;		
+	}
+	return false;
+}
+
+
 bool CheckAgainstBulbProps( entity_t* e, directlight_t* dl, Vector lightorg )
 {
-	float bulbtmp=0;
-	//some spots should be matched with bulbs and turned into point lights...
-	for( int i=0; i <= iBulb; i++ )
+	float dist=0;
+	for( int i=0; i <= nBulb; i++ )
 	{
-		if(  !bulbproporg[i].IsValid()  )
+		if(  !BulbOrg[i].IsValid()  )
 			continue;
 
-		bulbtmp = ( lightorg - bulbproporg[i] ).Length();
-		if( bulbtmp > fBulbNearbyEps )
-		{
-			/*printf( "failed: light %.f %.f  bulb %i  at %.f %.f  dist %.f\n",
-				dest[0], dest[1],
-				i, bulbproporg[i][0], bulbproporg[i][1], bulbtmp );*/
+		dist = ( lightorg - BulbOrg[i] ).Length();
+		if( dist > fBulbNearbyEps )
+		{/*
+			printf( "failed: light %.f %.f  bulb %i  at %.f %.f  (dist %.f)\n",
+				lightorg[0], lightorg[1],
+				i, BulbOrg[i][0], BulbOrg[i][1], dist );
+		*/
 			continue;
 		}
 
+		printf( "light at %.f %.f  match  BULB %i  at %.f %.f (dist %.f)  ->  pointlight\n",
+		lightorg.x, lightorg.y,	i,	BulbOrg[i][0], BulbOrg[i][1],	dist );
 
-
-		Vector tmp; GetVectorForKey(e, "angles", tmp);
-		if(  tmp.Length()  )
-		{
-			bool isFluor=false;
-			if( bulbpropang[i].z == 16 )
-				isFluor=true;
-			ParseLightSpot( e, dl, NULL, NULL, isFluor, 1 );
-			printf( "light at %.f %.f  match  bulb %i  at %.f %.f dist %.f  ->  spotlight(duh)\n",
-			lightorg.x, lightorg.y,	i,	bulbproporg[i][0], bulbproporg[i][1],	bulbtmp );
-		}
-		else
-		{
-			ParseLightPoint( e, dl, NULL, NULL );
-			printf( "light at %.f %.f  match  bulb %i  at %.f %.f dist %.f  ->  pointlight\n",
-			lightorg.x, lightorg.y,	i,	bulbproporg[i][0], bulbproporg[i][1],	bulbtmp );
-		}
-
-		
-		//ProcessBulbs( e, dl, lightorg, i );
-		
-		
-//		bulbproporg[i].Invalidate();
+		ParseLightPoint( e, dl, vecZero, NULL, false );
+	//	BulbOrg[i].Invalidate();//commented, there can also be fluor
 		return true;
 	}
 	return false;
 }
 
-void ProcessBulbs( entity_t* e, directlight_t* dl, Vector dest, int i )
+
+
+void RenderOmniFluors( entity_t* e, directlight_t* dl, Vector dest, unsigned propid );
+void RenderFluors( entity_t* e, directlight_t* dl, Vector dest, unsigned entid );
+
+
+bool CheckAgainstFluorProps( entity_t* e, directlight_t* dl, Vector lightorg, unsigned lightid )
 {
-	Vector propang = bulbpropang[i];
-	if(  !propang.IsValid()  )
-	{//simple bulb
-		printf( "simple bulb at %.f %.f\n", bulbproporg[i].x,bulbproporg[i].y );
-		ParseLightPoint( e, dl, bulbproporg[i], NULL );
-	}
-	else
-	{//omni fluor
-		Vector right, sublightorg, cylorg, fwd;
-		AngleVectors( QAngle( propang.x,propang.y,0 ),NULL,&right,NULL );
-		float step = 8.0f;
-		float cylstep = 10.0f;
-		float wing=1.0f;
-		if( propang.z)
-			wing = propang.z;//hack: stored width 40
-///					int lentimes = propang.z / step + 1;//pure statistics
-//					int cyltimes = 240/cylstep;//pure statistics
-		float numlights = (2*wing/step) * ((75+75)/cylstep) ;
-		float scaler = 1.0f / numlights;
-//			Msg("FilterBulbs scaler %.3f\n", scaler);
-
-
-		//why is fluor is in FilterBulbs? some architectural reason?
-		for( int j = -wing; j <= wing; j+=step )//create fake lights in circles ALONG tube
-		{
-			VectorMA( bulbproporg[i], j, right, sublightorg );
-			for( int k=-75; k<=75; k+=cylstep )//75 is pretty good; create fake lights in circles AROUND tube
-			{
-				// printf("debug k=%i\n", k );
-				//SetupLightNormalFromProps( QAngle( 0,0,0 ), propang.y,k, fwd );
-				AngleVectors( QAngle( -k,propang.y,0 ),&fwd );
-				VectorMA( sublightorg, 1.5, fwd, cylorg );
-				if( bulbpropang[i].z == 123 )
-				{
-					scaler = 10.0f;
-					break;
-				}
-				//TODO: I really have to predict total number of light beforehand
-				//ParseLightSpot( e, dl, cylorg, Vector( k,propang.y,0 ), true, scaler );
-				ParseLightPoint( e, dl, cylorg, numlights );
-			}
-			
-		}
-		Msg( "blurring one bulb into %.3f by length and %.3f by pitch\n", 2*wing/step, (75+75)/cylstep );
-	}
-}
-
-void ProcessFluors( entity_t* e, directlight_t* dl, unsigned entindex, Vector color, int i );
-bool CheckAgainstFluorProps( entity_t* e, directlight_t* dl, unsigned entindex, Vector color )
-{
-	//edge closer to the light can't be sharp and bright: mutually exclusive
-	float tmpfluor=0;
-	Vector dest;
-
-	for( int i=0; i <= iFluor; i++ )
+	int propid;
+	for( int i=0; i <= nFluor; i++ )
 	{
-		if(  !fluorproporg[i].IsValid()  )
+		if(  !FluorOrg[i].IsValid()  )
 			continue;
 		
-		//printf( "try light %i %i with %ith fluor %i %i %i dist %i\n",(int)dest.x,(int)dest.y, i, (int)fluorproporg[i][0], (int)fluorproporg[i][1], (int)fluorproporg[i][2],(int)tmpfluor );
-		dest = VectorForId( entindex,"origin" );
-		tmpfluor = ( dest - fluorproporg[i] ).Length();
+		float dist = ( lightorg - FluorOrg[i] ).Length();
+//		printf( "try light %.f %.f with %ith fluor %.f %.f ang %.f %.f (dist %.f)\n", lightorg.x,lightorg.y, i, FluorOrg[i][0], FluorOrg[i][1], FluorAngles[i].x, FluorAngles[i].y, dist );
 
-		if( tmpfluor>fFluorNearbyEps )
+		if( dist > fFluorNearbyEps )
 			continue;
 		
-		printf( "light at %.f %.f  match  fluor %i at %.f %.f  dist %.f  ->  spotlight\n",
-			dest.x, dest.y,
-			i, fluorproporg[i].x, fluorproporg[i].y, tmpfluor );
+		printf( "light at %.f %.f  match  FLUOR %i at %.f %.f  dist %.f  ->  spotlight\n",
+			lightorg.x, lightorg.y,
+			i,
+			FluorOrg[i].x, FluorOrg[i].y,
+			dist );
 
-		ParseLightSpot( e, dl, NULL, NULL, true, NULL );
-
-		//printf( "processing lightspot at %i %i\n", (int)dest.x,(int)dest.y );
-
-//		ProcessFluors(  e, dl, entindex, color, i  );
-		
-
-//		fluorproporg[i].Invalidate();
-
-		return true;
-	}
-
-	return false;
-}
-
-
-void ProcessFluors( entity_t* e, directlight_t* dl, unsigned entindex, Vector color, int i )
-{
-		Vector dest = VectorForId( entindex,"origin" );
-		Vector pitchstart,pitchend,gappedorg,sublightorg, propang, cylorg, fwd, right, up;				
-		propang = fluorpropang[i];
-
-		if( !propang.z )
-		{
-			Warning( "is this supposed to be a fluor?\n" );
-			return;
-		}
-		
-		float PitchWing = 90; // I had plans to make cmb lights spread left-right
-
-		//fluors can lean but only by pitch
-		pitchstart.x = propang.x-PitchWing;
-		pitchend.x = propang.x+PitchWing;			
-		
-		float cyltimes, lentimes;
-		
-		
-		// Msg( "fluorpropang %.f, numlights %i\n",
-		//fluorpropang[i].z, dimtimes );
-
-		float wing = 0.5*propang.z;
-		cyltimes=8;
-		lentimes=3;
-		float step = 2*wing / lentimes;
-		
-		float pitchstep = (90-120)/cyltimes;  //  2*( PitchWing ) / (cyltimes);
-		//printf( "cylstep = %.1f", cylstep );
-		AngleVectors( QAngle( -propang.x,propang.y,0 ), &fwd, &right, &up );
-
-		float cylradius;
-		if( Axial( propang.x ) )
-			cylradius = 0;//28.0f;//22 just okay
-		else
-			cylradius = 0;//24.0f;
-
-		float scaler = 1.0f / 27.f;//(  floor(1+2*PitchWing/pitchstep) * (1+2*lentimes)  );
-
-		float gap=0.0f;	VectorMA( fluorproporg[i], gap, fwd, gappedorg );		
-		for( int j=-floor(0.5f*lentimes); j<=floor(0.5f*lentimes); j++)
-		{
-			VectorMA( gappedorg, j*step, right, sublightorg );					
-			
-			ParseLightSpot( e, dl, sublightorg, Vector(propang.x,propang.y,0), true, scaler );
-			float onthisside=8;
-			int t=1;
-			float wingspread=100;
-			float k;
-			for( k=propang.x+wingspread; k>=propang.x; k-=wingspread/onthisside );
-			{	
-				VectorAdd( sublightorg, 2*(t*t)*fwd+4*t*up, cylorg );  //  place them in V-shape
-				ParseLightSpot( e, dl, cylorg, Vector(k,propang.y,0), true, scaler );
-				t++;
-			}
-			t=0; k=0;
-			/*for( k=propang.x; k>=pitchstart.x; k-=pitchstep )
-			{
-				VectorMA( sublightorg, t*t*t, 0.4*fwd-0.1*up, cylorg );  //  place them in V-shape
-				ParseLightSpot( e, dl, cylorg, Vector(k,propang.y,0), true, scaler );
-				t++;
-			}*/
-		}
-		gappedorg = vecZero;
-		Msg( "blurring one fluor into %.f by length and %.f by pitch\n", 1+2*lentimes, floor(2*PitchWing/pitchstep) );
-}
-
-bool CheckAgainstNozzleProps( entity_t* e, directlight_t* dl, Vector dest )
-{
-	float tmpnozzle=0;
-	for( int i=0; i<=iNozzle; i++ )
-	{
-		// printf("nozzle %i\n", i );
-		if(  !nozzleproporg[i].IsValid()  )
-		{
-			/*if( dest.x < -3000 && dest.x >-3500)
-			printf( "failed: light %.f %.f  noz %i at %.f %.f  dist %.f\n",
-			dest.x, dest.y,
-			i, nozzleproporg[i].x, nozzleproporg[i].y, tmpnozzle );*/
-			continue;
-		}
-		
-		tmpnozzle = ( dest - nozzleproporg[i] ).Length();
-		if( tmpnozzle > fNozzleNearbyEps )
-			continue;
-
-		ParseLightSpot( e, dl, NULL, NULL, false, 1 );
-		
-		
-		//float scaler = 1;
-		//ParseLightSpot( e, dl, nozzleproporg[i], nozzlepropang[i], false, scaler );
-
-		printf( "light_spot at %.f %.f  match  nozzle %i at %.f %.f ang %.f %.f  dist %.f  ->  spotlight\n",
-			dest.x, dest.y,
-			i, nozzleproporg[i][0], nozzleproporg[i][1],  
-			nozzlepropang[i][0],nozzlepropang[i][1], tmpnozzle );
-		
-
-//		nozzleproporg[i].Invalidate();
-
+		propid=i;
+		RenderFluors( e, dl, vecZero, propid );
+	//	ParseLightSpot( e, dl, lightorg, NULL, false, 1 );
+	//	FluorOrg[i].Invalidate();//actualy it cant catch a wrong one
 		return true;
 	}
 	return false;
 }
 
-/*void FilterProjectors( entity_t* e, directlight_t* dl, Vector dest )//obsolete
+
+bool CheckAgainstOmnifluorProps( entity_t* e, directlight_t* dl, Vector lightorg, unsigned entid )
 {
-	FourVectors start4, stop4;
-//	fltx4 fractionVisible;
-	Vector start, stop, relocnormal;
-	for( int i=0; (i<=iProj) && (projproporg[i].IsValid()); i++ )
+	int propid;
+	for( int i=0; i <= nOmnifluor; i++ )
 	{
-		float reloctmp=(dest-projproporg[i]).Length();
-		if( reloctmp<=fRelocNearbyEps )
-		{				
-			printf( "'light_spot':  spot with %ith reloc  at %.f %.f %.f  distance %.f  will be pointlight\n",
-				iProj, projproporg[i][0], projproporg[i][1], projproporg[i][2], reloctmp );
-*/
-			//start commented out tracing
-			/*AngleVectors( QAngle( 0, projpropang[i].y, 0 ), &relocnormal );
-			VectorMA( projproporg[i], 50, relocnormal, start );
-			start4.DuplicateVector( start );
-			stop4.DuplicateVector( start + Vector( 0, 0, 4096 ) );
-			// returns 1 if the ray sees the sky
-			TestLine_DoesHitSky ( start4, stop4, &fractionVisible );
-			
-			if( TestSignSIMD( CmpGtSIMD( fractionVisible, Four_Zeros ) ) )
-			{
-				// fiv: traced to sky; 
-				printf( "projector %i pos %.f %.f outside: %.4f\n", i, projproporg[i].x, projproporg[i].y, fractionVisible.m128_f32[0] );
-				continue;// no projs outside
-			}*/
-			/*else
-			{
-				printf( "reloc %i pos %.f %.f %.f inside: %.4f\n", i, projproporg[i].x, projproporg[i].y, projproporg[i].z, fractionVisible.m128_f32[0] );
-				start4.DuplicateVector( projproporg[i] );
-				//trace fwd
-				AngleVectors( QAngle( 0, projpropang[i].y, 0 ), &relocnormal );
-				float ln=0;
-				for( ln=0; ln<500; ln++ )
-				{
-					//outputs 1 in fractionVisible if no occlusion
-					VectorMA( projproporg[i], ln, relocnormal, stop );
-					stop4.DuplicateVector( stop );
-					TestLine ( start4, stop4, &fractionVisible );
-					if( !TestSignSIMD( CmpGtSIMD( fractionVisible, Four_Zeros ) ) ) break;
-				}
-				//printf( "reloc %i traced for %.f fwd to %.f %.f %.f\n", i, ln, stop.x, stop.y, stop.z );
+		if(  !OmnifluorOrg[i].IsValid()  )
+			continue;
+		
+		float dist = ( lightorg - OmnifluorOrg[i] ).Length();
+//		printf( "try light %.f %.f with %ith omnifluor %.f %.f (dist %.f)\n", lightorg.x,lightorg.y, i, OmnifluorOrg[i][0], OmnifluorOrg[i][1], dist );
 
-				// and now trace up
-				start += ( stop - start ) / 2;
-				start4.DuplicateVector( start );
-				stop=start;
-				for( ln=0; ln<500; ln++ )
-				{
-					//outputs 1 in fractionVisible if no occlusion
-					stop.z += ln;
-					stop4.DuplicateVector( stop );
-					TestLine ( start4, stop4, &fractionVisible );
-					//printf( "reloc %i traced for %.f up to %.f %.f %.f\n", i, ln, stop.x, stop.y, stop.z );
-					if( !TestSignSIMD( CmpGtSIMD( fractionVisible, Four_Zeros ) ) ) break;
-				}
-				//printf( "reloc %i traced for %.f up to %.f %.f %.f\n", i, ln, stop.x, stop.y, stop.z );
-				projproporg[i] = stop-Vector( 0, 0, 10 );
-				printf( "vec stop %.f %.f %.f\n",
-					stop.x,stop.y,stop.z );
-					// projproporg[0],projproporg[1],projproporg[2] ); // proporg was invalidated
+		if( dist > fFluorNearbyEps )
+			continue;
+		
+		printf( "light at %.f %.f  match  OMNIFLUOR %i at %.f %.f  dist %.f  ->  spotlight\n",
+			lightorg.x, lightorg.y,	i, OmnifluorOrg[i].x, OmnifluorOrg[i].y, dist );
 
-				//printf( "reloc %i pos %.f %.f fwd wall: %.4f\n", i, projproporg[i].x, projproporg[i].y, fractionVisible.m128_f32[0] );
-			}*/
-			//end commented out tracing
+		propid=i;
 
-			// ParseLightPoint( e, dl, projproporg[i], NULL );	
-/*			ParseLightSpot( e, dl, projproporg[i], projpropang[i], 0, vecZero, false );
-			projproporg[i].Invalidate();
-			dest.Invalidate();
-			break;
+		RenderOmniFluors( e, dl, lightorg, propid  );
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		OmnifluorOrg[i].Invalidate();
+		return true;
+	}
+	return false;
+}
+
+
+bool CheckAgainstNozzleProps( entity_t* e, directlight_t* dl, Vector lightorg, unsigned entid )
+{
+	float dist=0;
+	for( int i=0; i<=nNozzle; i++ )
+	{
+		if(  !NozzleOrg[i].IsValid()  )
+			continue;
+		
+		dist = ( lightorg - NozzleOrg[i] ).Length();
+		if( dist > fNozzleNearbyEps )
+			continue;
+
+		printf( "light_spot at %.f %.f  match  NOZZLE %i at %.f %.f ang %.f %.f  (dist %.f)  ->  spotlight\n",
+			lightorg.x, lightorg.y,
+			i, NozzleOrg[i][0], NozzleOrg[i][1], NozzleAngles[i][0],NozzleAngles[i][1],
+			dist );
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		ParseLightSpot( e, dl, vecZero, invalidangles, false, NULL );
+	//	NozzleOrg[i].Invalidate();  //  don't invalidate: to catch Eli's double-sided lights
+		return true;
+	}
+	return false;
+}
+
+
+bool CheckAgainstNotadeviceProps( entity_t* e, directlight_t* dl, Vector lightorg, unsigned entid )
+{
+	float dist=0;
+	for( int i=0; i<=nNotadevice; i++ )
+	{
+		if(  !NotadeviceOrg[i].IsValid()  )
+			continue;
+		
+		dist = ( lightorg - NotadeviceOrg[i] ).Length();
+		if( dist > 110 )//66+
+			continue;
+
+		Vector invalidangles;
+		invalidangles.Invalidate();
+		char *name = ValueForKey (e, "classname");
+		if( !strcmp(name,"light_spot") )
+		{
+			printf( "light_spot at %.f %.f  match  NOTADEVICE %i at %.f %.f  (dist %.f)  ->  spotlight\n",
+			lightorg.x, lightorg.y,
+			i, NotadeviceOrg[i][0], NotadeviceOrg[i][1],
+			dist );
+
+			ParseLightSpot( e, dl, NotadeviceOrg[i], invalidangles, false, NULL );
+		}
+		else if( !strcmp(name,"light") )
+		{
+			printf( "light at %.f %.f  match  NOTADEVICE %i at %.f %.f  (dist %.f)  ->  spotlight\n",
+			lightorg.x, lightorg.y,
+			i, NotadeviceOrg[i][0], NotadeviceOrg[i][1],
+			dist );
+
+			ParseLightPoint( e, dl, vecZero, NULL, false );
+		}
+		NotadeviceOrg[i].Invalidate();
+		return true;
+	}
+	return false;
+}
+
+
+void RenderOmniFluors( entity_t* e, directlight_t* dl, Vector lightorg, unsigned propid )
+{
+	Vector proporg = OmnifluorOrg[propid];
+	Vector propang = OmnifluorAngles[propid];
+
+//	printf( "omni fluor at %.f %.f\n", OmnifluorOrg[propid].x,OmnifluorOrg[propid].y );
+	Vector fw, rt, up, sublightorg, cylorg;
+	AngleVectors( QAngle( propang.x,propang.y,0 ),&fw,&rt,&up );
+	float step = 8.0f;
+	float wing=28;  // 0.5m/2.5  //btw press PageDown LOL
+	float lightswidth = 1 + ceil(2*wing/step);
+	float lightsaround = 5;  // others in wall
+	float numlights = lightswidth * lightsaround;
+	numlights *= numlights;
+	
+	if( FloatForKey( e, "_cone" ) )
+			//	numlights *= 180.f / FloatForKey( e, "_cone" );
+		numlights /= 2.f / (1.f - (float)cos(FloatForKey( e, "_cone" )/180.f*M_PI) );
+
+	
+	
+/*	Vector intensity, luxelval;
+	float range, falloff;
+	if( !g_bHDR )
+	{
+		LightForKey( e, "_light", intensity );
+
+		float constant_attn = FloatForKey (e, "_constant_attn" );
+		float linear_attn = FloatForKey (e, "_linear_attn" );
+		float quadratic_attn = FloatForKey (e, "_quadratic_attn" );
+
+		if ( constant_attn < EQUAL_EPSILON )	constant_attn = 0;
+		if ( linear_attn < EQUAL_EPSILON )	linear_attn = 0;
+		if ( quadratic_attn < EQUAL_EPSILON )	quadratic_attn = 0;
+		if ( constant_attn < EQUAL_EPSILON && linear_attn < EQUAL_EPSILON && quadratic_attn < EQUAL_EPSILON )	constant_attn = 1;
+		
+		float ratio = ( constant_attn + 100 * linear_attn + 100 * 100 * quadratic_attn );
+		if ( ratio > 0 )
+			VectorScale( intensity, ratio, intensity );
+
+		range = 3.3f;  //  d1_ts03 first fluor is 11 units under ceiling
+		range += 1.f;
+
+		falloff = range*range;
+		falloff *= quadratic_attn;
+		falloff += linear_attn*range;
+		falloff += constant_attn;
+		falloff = 1/falloff;
+
+		luxelval = intensity *= falloff;
+		if( VectorMaximum( luxelval ) > 512 )
+			numlights *= VectorMaximum( luxelval ) / 512.f;		
+	}*/
+
+	float range;
+	for( int j = -wing; j <= wing; j+=step )//create fake lights in circles ALONG tube
+	{
+		VectorMA( OmnifluorOrg[propid], j, rt, sublightorg );
+		{
+			range = 10;
+			//  they inflate model for lighting by 4 units!
+			ParseLightPoint( e, dl, sublightorg+range*up, numlights, false ); 
+			ParseLightPoint( e, dl, sublightorg+range*up, numlights, false ); 
+			ParseLightPoint( e, dl, sublightorg+range*up, numlights, false ); 
+			ParseLightPoint( e, dl, sublightorg+range*up, numlights, false ); 
+
+			range = 10*0.707f;
+			ParseLightPoint( e, dl, sublightorg+range*(up+fw), numlights, false );  // 0.5*fw don't go in a wall
+			ParseLightPoint( e, dl, sublightorg+range*(up-fw), numlights, false );
+			ParseLightPoint( e, dl, sublightorg+range*(-up-fw), numlights, false );
+			ParseLightPoint( e, dl, sublightorg+range*(-up+fw), numlights, false );
 		}
 	}
-}*/
+//	Msg( "blurring one omnifluor into %.f by length, %.f by pitch, %.f by brightness\n",
+//		1.f+ceil(2.f*wing/step), 3.f, 180.f/FloatForKey( e, "_cone" ) );//(75+75)/cylstep );
+}
+
+
+
+void RenderFluors( entity_t* e, directlight_t* dl, Vector dest, unsigned propid )
+{
+	Vector proporg = FluorOrg[propid];
+	Vector propang = FluorAngles[propid];
+
+	Vector fw, rt, up, sublightorg;
+	AngleVectors( QAngle( propang.x,propang.y,0 ),&fw,&rt,&up );
+	float step = 8.0f;
+	float wing=20;// 0.5m/2.5
+	float numlights = 1 + ceil(2*wing/step);
+//	if( ((int)propang[0] % 90) )
+//		numlights *= numlights;
+	
+//	if( FloatForKey( e, "_cone" ) )
+//		numlights *= 180.f / FloatForKey( e, "_cone" );
+
+	for( int j = -wing; j <= wing; j+=step )
+	{
+		VectorMA( FluorOrg[propid], j, rt, sublightorg );
+		ParseLightSpot( e, dl, sublightorg, propang, true, 1.0f / numlights );
+	}
+//	Msg( "blurring one fluor into %.f by length, %.f by pitch, %.f by brightness\n",
+//		1.f+ceil(2.f*wing/step), 3.f, 180.f/FloatForKey( e, "_cone" ) );
+}
+
 
 /*
   =============
   CreateDirectLights
   =============
 */
-#define DIRECT_SCALE (100.0*100.0) // only used in texlights, don't bother too much
-
+#define DIRECT_SCALE (100.0*100.0)  //  for texlights only
 
 void CreateDirectLights (void)
 {
@@ -2772,9 +2801,13 @@ void CreateDirectLights (void)
 	Vector	        dest;
 
 	numdlights = 0;
+	int numtexlights = 0;
 
 	FreeDLights();
 
+	Vector invalidangles;
+	invalidangles.Invalidate();
+	Vector tmplightvec;
 
 	//
 	// surfaces
@@ -2794,66 +2827,103 @@ void CreateDirectLights (void)
 		if( VectorAvg( p->baselight ) >= dlight_threshold )
 		{
 			dl = AllocDLight( p->origin, true );
+			numtexlights++;
 
 			dl->light.type = emit_surface;
 				
 			if( p->normal != vecZero )
-				VectorCopy (p->normal, dl->light.normal);//texlight
+				VectorCopy (p->normal, dl->light.normal);  //  texlight
 
 			Assert( VectorLength( p->normal ) > 1.0e-20 );
 
 			// scale intensity by number of texture instances
 			VectorScale( p->baselight,  lightscale * p->area * p->scale[0] * p->scale[1] / p->basearea,  dl->light.intensity );
 
-			
-			float newint = pow( RGBintensity(dl->light.intensity)/255.0f, g_fGammaScale ) * 255.0f;
-			float oldint = RGBintensity(dl->light.intensity);
-			float fakegamma = newint/oldint;
-			VectorScale( dl->light.intensity, fakegamma, dl->light.intensity );
-			
-
 			// scale to a range that results in actual light
 			VectorScale( dl->light.intensity, DIRECT_SCALE, dl->light.intensity );
+
+
+			bool NearGrate=false;
+			for( int i=0; i<=nNotadevice; i++ )
+			{
+				if( !g_bLightingFixes )
+					break;
+
+				if(  !NotadeviceOrg[i].IsValid()  )
+					continue;
+				
+				if(  (p->origin-NotadeviceOrg[i]).Length()>64  )
+					continue;
+				//  grate nearby
+				NearGrate=true;
+				break;
+			}
+			if( NearGrate )
+				continue;
+			//  texlights near grates are detected elsewhere
+
+
+			//  check for spotlights near texlights
+			for (int j=0; j<(unsigned)num_entities ; j++)
+			{
+				if( !g_bLightingFixes )
+					break;
+
+				e = &entities[j];
+				name = ValueForKey (e, "classname");
+				if( strcmp(name,"light_spot") )  //  "if not a spot"
+					continue;
+				GetVectorForKey( e, "origin", dest );
+		
+				if( (p->origin - dest).Length() > 32 )
+					continue;
+				printf("lightspot near texlight dist %.f\n", (p->origin - dest).Length()  );
+				ParseLightSpot( e, dl, dest, invalidangles, false, NULL );
+				break;
+			}
 		}
 	}
-	
+	Warning("%i texlights added\n", numtexlights );
+
+
 	//
 	// entities
 	//
 
-	if( g_bSkipFakeLights )
+
+	char *skyname = SkyboxBitmap();
+
+//  redirect light_env to match env_sun
+	if( g_bLightingFixes )
 	{
-		printf( "analyzing sun position...\n" );
-		EnvSunAngles.Invalidate();
 		for(i=0; i<(unsigned)num_entities; i++)
 		{
 			e = &entities[i];
 			name = ValueForKey( e, "classname" );
 			if( !strcmp( name, "env_sun" ) )
 			{
+				GetVectorForKey( e, "angles", EnvSunAngles );  //  yaw filled here
+				EnvSunAngles[0] = FloatForKey( e, "pitch" );
 				has_env_sun = true;
-				GetVectorForKey( e, "angles", EnvSunAngles );
-				EnvSunAngles[0] = FloatForKey( e, "pitch" );	
+				printf( "env_sun pitch %.f angle %.f\n", EnvSunAngles[0], EnvSunAngles[1] );
 				break;
 			}
 		}
-		if( has_env_sun )
-			Warning( "env_sun pitch %.f angle %.f\n", EnvSunAngles[0], EnvSunAngles[1] );
-		else
-			Warning( "no env_sun on this map\n" );
+		if( !has_env_sun )
+			printf( "no env_sun on this map\n" );
+	
+		Warning( "constructing fire libraries...\n" );
+		CreateFirelibs( e );
+
+		Warning( "creating prop_dynamic library...\n" );
+		CreatePropDynLibs( e );
+
+		Warning( "\ndynamic props: %i bulbs, %i fluors, %i nozzles\n\n", nBulb+1, nFluor+1, nNozzle+1 );
 	}
 
-	// find all dynamic lightprops before checking for lights...
-	{
-	//  printf("Fires are fixed at all times\n");
-	CreateFirelibs( e );
+	
 
-	printf( "creating prop_dynamic library...\n" );
-	CreatePropDynLibs( e );
-
-	printf( "\ndynamic props: %i bulbs, %i fluors, %i nozzles\n\n", iBulb+1, iFluor+1, iNozzle+1 );
-	}
-
+	Warning("\nparsing lights, spots and envs\n");
 	for (i=0; i<(unsigned)num_entities ; i++)
 	{
 		e = &entities[i];
@@ -2866,256 +2936,46 @@ void CreateDirectLights (void)
 		if (!strcmp (name, "light_dynamic"))
 			continue;
 
+
 		if( !strcmp(name,"light_spot") )
 		{
-			if( !g_bSkipFakeLights )
-				ParseLightSpot( e, dl, NULL, NULL, false, 1 );
-			else
-			{	
-				// light's nature is defined not by classname but by nearby prop's nature
-				GetVectorForKey( e, "origin", dest );
-				CheckAgainstFluorProps( e, dl, i, vecZero );
-				CheckAgainstNozzleProps( e, dl, dest );
-				CheckAgainstBulbProps( e, dl, dest );
-				//omnis are leftovers cause they're typically brightness hack
-			}
-		}
-		else if( !strcmp( name, "light_environment" ) )
-		{
-			static bool bProcessClouds=true;
-			Msg("found light_environment...\n" );
-			ParseLightEnvironment( e, dl );
-
-			if( g_bCloudLight && bProcessClouds )
+			if( g_bLightingFixes )
 			{
-				// summed up cloudlight energy equals energy of the sun, it's like the 2nd sun but stretched thin
-				printf("process clouds: %i; create cloud lights...\n", bProcessClouds );
-				float pitch=0, start=0, end=0, step=0;
-				Vector CloudRGB = vecZero;
-				char *skyname = SkyboxBitmap();
-				printf("found skybox %s\n", skyname );
-				
-				if(  !strnicmp( skyname,"sky_day01_01", 12 )  )//background01; trainstation01-06
-				{	
-					//top hat
-					start=-79, end=-3, pitch=-30, step=AVG(-26.5f,34.f);
-					CloudRGB = (  Vector(249,247,233)+Vector(112,116,125)  )*0.5f;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );  //  divide by vert layer num
-					step=26.5*0.25f;
-					// top layer
-					//right
-					start=-88, end=24, pitch=-26.5*0.75f;
-					CloudRGB = ( Vector(249,247,233)+Vector(195,196,185) )*0.5f;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//left
-					start=-1, end=79, pitch=-26.5*0.75f;
-					CloudRGB = Vector(228, 226, 204);
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					// bottom layer
-					//right
-					start=-88, end=24, pitch=-26.5*0.25f;
-					CloudRGB = Vector(231, 231, 217);
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//left
-					start=-1, end=79, pitch=-26.5*0.25f;
-					CloudRGB = Vector(231, 229, 209);
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//horizon highlight
-					CloudRGB = Vector(113, 116, 119)/255.f*60;
-					start=-109, end=-88+step, pitch=-26.5*0.25f;				
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					start=79-step, end=126, pitch=-26.5*0.125f;				
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-				}
-
-				else if(  !strnicmp( skyname,"sky_day01_04", 12 )  )//d1canals01, d1canals01a, d1canals02
-				{
-					step=6;
-					//top
-					//  right
-					CloudRGB = Vector(220, 221, 214);
-					pitch=-22*0.75f;
-					start=-64, end=18;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//  left
-					CloudRGB = Vector(226, 229, 218);
-					start=18, end=117;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//bottom
-					pitch=-22*0.25f;
-					//  right
-					CloudRGB = Vector(229, 229, 220);
-					start=-126.5, end=18;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-					//  left
-					CloudRGB = Vector(234, 231, 216);
-					start=18, end=129;
-						ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB );
-				}
-				
-				else if(  !strnicmp( skyname,"sky_day01_05", 12 )  )
-				/*
-				d1_canals_03
-				d1_canals_05
-				background02
-				d1_canals_06
-				d1_canals_07
-				d1_canals_08 
-				*/
-				{
-					//level 1
-					//right
-					CloudRGB = Vector(244, 235, 203);
-					start=-126, end=-64+step, pitch=-3.5, step=3.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//center
-					CloudRGB = Vector(253, 252, 238);
-					start=-64-step, end=-24+step, pitch=-4.5, step=4.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//left
-					CloudRGB = Vector(230, 225, 204);
-					start=-24-step,end=128, pitch=-6, step=6;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//lvl 2
-					// right
-					CloudRGB = Vector(200,197,178);
-					start=-106, end=-78, pitch=-10, step=AVG(-9.4f,18.4f);
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					// cent
-					CloudRGB = Vector(253, 252, 236)*1.5f;
-					start=-78, end=-24, pitch=AVG(-9.4f,-18.4f), step=AVG(-9.4f,18.4f);
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					// left
-					CloudRGB = Vector(240,237,213);
-					start=-24, end=30, pitch=-15.8, step=AVG(-9.4f,18.4f);
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//a cloud
-					CloudRGB = Vector(230,227,202);
-					start=44.5, end=75, pitch=-15.8, step=AVG(-9.4f,18.4f);
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//lvl 3
-					//cent
-					CloudRGB = Vector(253, 251, 234)*1.5f;
-					start=-74, end=-43, pitch=AVG(-18.4f,-29.f), step=AVG(-18.4f,29.f);
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-				}
-				
-				else if(  !strnicmp( skyname,"sky_day01_06", 12 )  )  //  d1_canals_09 - d1_canals_11 
-				{
-					//lev 1
-					//bottom right
-					step=7*0.5, pitch= -7*0.5;
-					CloudRGB = Vector(223,208, 163 );
-					start= -119, end= -63.8+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					// center
-					CloudRGB = Vector(247,240,215);
-					start= -63.8-step, end= -23+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//bottom left
-					CloudRGB = Vector(224,202, 152 );
-					start= -23-step, end= 121+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//lev 2
-					//gorb1 left
-					pitch= -14*0.75, step=AVG(-7.f, 14.f);
-					CloudRGB = Vector(210,192,146);
-					start= 44.5, end= 77.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					// center
-					CloudRGB = Vector(248,246,210)*0.5 + Vector(253,252,247)*0.5;
-					start= -90.5, end= -23+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//gorb2 left
-					CloudRGB = Vector(240,226,121);
-					start= -23-step, end= 25.5;					
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-					//lev 3
-					// center
-					pitch=AVG(-14.f, -25.f), step=AVG(-14.f, 25.f);
-					CloudRGB = Vector(251,245,211)*0.5 + Vector(255,253,235)*0.5;
-					start= -73.8, end= -45.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/3 );
-				}
-
-				else if(  !strnicmp( skyname,"sky_day01_07", 12 )  )  //  d1_canals_12
-				{
-					// lev 1
-					//yellow
-					pitch=AVG(-4.f, 0.f), step=AVG(4.f, 0.f);
-					CloudRGB = Vector(238,240,164)*0.5 + Vector(239,240,192)*0.5;
-					start= -112.5, end= -36.8;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// greenish yellow					
-					CloudRGB = Vector(232,233,176);
-					start= -36.8, end= 57;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// pink					
-					CloudRGB = Vector(233,204,144);
-					start= 57, end= 93.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// more yellow					
-					CloudRGB = Vector(238,228,153);
-					start= -93.5, end= 128.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// more pink					
-					CloudRGB = Vector(210,162,106);
-					start= 128.5, end= 147.5;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// lev 2
-					// right
-					pitch=AVG(-4.f, -5.f), step=AVG(-4.f, 5.f);
-					CloudRGB = Vector(251,245,211);
-					start= -110, end= -98;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					// center
-					pitch=AVG(-4.f, -8.f), step=AVG(-4.f, 8.f);
-					CloudRGB = Vector(251,245,211);
-					start= -80.84, end= -61;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-				}
-
-				else if(  !strnicmp( skyname,"sky_day01_08", 12 )  )  //  d1_canals_13, d1_eli_01
-				{
-					// lev 1
-					//left
-					pitch=AVG(-6.5f, 0.f), step=AVG(6.5f, 0.f);
-					CloudRGB = Vector(221,183,109);
-					start= -140, end= -91+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					//cent					
-					CloudRGB = Vector(229,233,173);
-					start= -91-step, end= -61+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					//right					
-					CloudRGB = Vector(219,199,144);
-					start= -61-step, end= -11.5+step;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-					//lev 2
-					//cent
-					pitch=AVG(-6.5f, -14.5f), step=AVG(-6.5f, 14.5f);
-					CloudRGB = Vector(220,142,76);
-					start= -111, end= -53;
-					ParseCloudLight( e, dl, pitch, start, end, step, CloudRGB/2 );
-				}
-
-				bProcessClouds=false;
-			}			
-
-
+				unsigned lightid=i;
+				// light's nature is defined not by classname but by what nearby prop's nature would be irl
+				GetVectorForKey( e, "origin", dest );
+				if( CheckAgainstOmnisRenderBoth( e, dl, dest ) )
+					continue;
+				else if( CheckAgainstOmnifluorProps( e, dl, dest, lightid ) )
+					continue;
+				else if( CheckAgainstFluorProps( e, dl, dest, lightid ) )
+					continue;
+				else if( CheckAgainstNozzleProps( e, dl, dest, lightid ) )
+					continue;
+				else if( CheckAgainstBeams( e, dl, dest )  )//  point_spotlight
+					continue;
+				else if( CheckAgainstNotadeviceProps( e, dl, dest, lightid ) )  //  sewer grate in canals
+					continue;
+//				else if( CheckAgainstBulbProps( e, dl, dest ) )
+//					continue;
+//				else
+//					Msg( "spotlight skipped\n" );
+			}
+			else
+				ParseLightSpot( e, dl, vecZero, invalidangles, false, NULL );
 		}
 		else if( !strcmp( name, "light" ) )
+			continue;
+		else if( !strcmp( name, "light_environment" ) )
 			continue;
 		else
 		{
 			qprintf( "unsupported light entity: \"%s\"\n", name );
 		}
 	}
-	printf("\nfinished parsing lights, spots and envs\n\n");
 
 
-
-
+	Warning("parsing point lights\n");
 	for (i=0 ; i<(unsigned)num_entities ; i++)
 	{
 		e = &entities[i];
@@ -3124,17 +2984,317 @@ void CreateDirectLights (void)
 		if( !strcmp(name, "light" ) ) 
 		{
 			GetVectorForKey( e, "origin", dest );
-			//  ParseLightPoint( e, dl, NULL, NULL );
-			if ( CheckAgainstFires( e, dl, dest ) == true  )  //  light is nearby fire
-				continue;
-			if( g_bSkipFakeLights )
-			{  
+			if( g_bLightingFixes )
+			{
+				if(  CheckAgainstFires(e,dl,dest)  )  //  light is nearby fire
+					continue;
+
+				unsigned lightid=i;
 				//  light's nature is defined not by classname but by nearby prop's nature
-				CheckAgainstBulbProps( e, dl, dest );
+			//	if( CheckAgainstOmnifluorProps( e, dl, dest, lightid )  )
+			//		continue;
+				
+				
+				if( CheckAgainstBulbProps( e, dl, dest ) )
+					continue;  //  omnis are typically a brightness hack
+				else if( CheckAgainstNotadeviceProps( e, dl, dest, lightid ) )  //  metal ladder
+					continue;
+				else if( CheckAgainstMisc( e, dl, dest ) )
+					continue;
+//				else
+//					Msg("pointlight skipped\n" );
 			}
+			else
+				ParseLightPoint( e, dl, vecZero, NULL, false );
 		}	
 	}
-	printf("\nfinished parsing lights\n\n");
+
+	//  fake suns go line after line (now only in debug, otherwise it's a gradient)
+	//  cloudlight is NOT cancelled by skipsunlight_skylight
+	if( g_bCloudlight )
+	{	
+		float pitch=0, start=0, end=0, step=0;
+		Vector CloudRGB = vecZero;
+		printf("found skybox %s\n", skyname );
+		bPredictionPass = true;
+
+WorkPass:
+		if( bPredictionPass == false )	printf("Cloud pass 2\n");
+
+		//  step= 2 x radius=row vertical height
+		if(  !strnicmp( skyname,"sky_day01_01", 12 )  )//background01; trainstation01-06
+		{			
+		step = -26.5f - (-34.f);
+			//top hat
+			start=-79, end=-3, pitch=-30;
+			CloudRGB = Vector(249,247,233);//  AVG(  Vector(249,247,233),  Vector(112,116,125)  );
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+
+		step=26.5*0.25f;//four half-heights
+			// top layer
+			//right
+			start=-88, end=24, pitch=-26.5*0.75f;
+			CloudRGB = Vector(249,247,233);//  AVG(  Vector(249,247,233),  Vector(195,196,185)  );
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//left
+			start=-1, end=79, pitch=-26.5*0.75f;
+			CloudRGB = Vector(228, 226, 204);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+
+			// bottom layer
+			//right
+			start=-88, end=24, pitch=-26.5*0.25f;
+			CloudRGB = Vector(231, 231, 217);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//left
+			start=-1, end=79, pitch=-26.5*0.25f;
+			CloudRGB = Vector(231, 229, 209);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+
+			//horizon highlight
+			start=-109, end=-88+step, pitch=-26.5*0.25f;
+			CloudRGB = Vector(113, 116, 119);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			start=79-step, end=126, pitch=-26.5*0.125f;
+			CloudRGB = Vector(113, 116, 119);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+
+		else if(  !strnicmp( skyname,"sky_day01_04", 12 )  )//d1canals01, d1canals01a, d1canals02
+		{
+		step=6;
+			//top
+			//  right
+			CloudRGB = Vector(220, 221, 214);
+			pitch=-22*0.75f; start=-64, end=18;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//  left
+			CloudRGB = Vector(226, 229, 218);
+			start=18, end=117;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//bottom
+			pitch=-22*0.25f;
+			//  right
+			CloudRGB = Vector(229, 229, 220);
+			start=-126.5, end=18;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//  left
+			CloudRGB = Vector(234, 231, 216);
+			start=18, end=129;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+		
+		else if(  !strnicmp( skyname,"sky_day01_05", 12 )  ) // d1_canals_03 d1_canals_05 background02 d1_canals_06 d1_canals_07 d1_canals_08
+		{
+			//level 1
+			//right
+			CloudRGB = Vector(244, 235, 203);
+			start=-126, end=-64+step, pitch=-3.5, step=3.5;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//center
+			CloudRGB = Vector(253, 252, 238);
+			start=-64-step, end=-24+step, pitch=-4.5, step=4.5;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//left
+			CloudRGB = Vector(230, 225, 204);
+			start=-24-step,end=128, pitch=-6, step=6;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//lvl 2
+			// right
+			CloudRGB = Vector(200,197,178);
+			start=-106, end=-78, pitch=-10, step=AVG(-9.4f,18.4f);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// cent
+			CloudRGB = Vector(253, 252, 236)*1.5f;  //  hdr??
+			start=-78, end=-24, pitch=AVG(-9.4f,-18.4f), step=AVG(-9.4f,18.4f);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// left
+			CloudRGB = Vector(240,237,213);
+			start=-24, end=30, pitch=-15.8, step=AVG(-9.4f,18.4f);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//a cloud
+			CloudRGB = Vector(230,227,202);
+			start=44.5, end=75, pitch=-15.8, step=AVG(-9.4f,18.4f);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//lvl 3
+			//cent
+			CloudRGB = Vector(253, 251, 234)*1.5f;  //  hdr??
+			start=-74, end=-43, pitch=AVG(-18.4f,-29.f), step=AVG(-18.4f,29.f);
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+		
+		else if(  !strnicmp( skyname,"sky_day01_06", 12 )  )  //  d1_canals_09...d1_canals_11 
+		{
+			//lev 1
+			//bottom right
+			step=7*0.5, pitch= -7*0.5;
+			CloudRGB = Vector(223,208, 163 );
+			start= -119, end= -63.8+step;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			// center
+			CloudRGB = Vector(247,240,215);
+			start= -63.8-step, end= -23+step;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			//bottom left
+			CloudRGB = Vector(224,202, 152 );
+			start= -23-step, end= 121+step;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			//lev 2
+			//gorb1 left
+			pitch= -14*0.75, step=AVG(-7.f, 14.f);
+			CloudRGB = Vector(210,192,146);
+			start= 44.5, end= 77.5;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			// center
+			CloudRGB = AVG(  Vector(248,246,210),  Vector(253,252,247)  );
+			start= -90.5, end= -23+step;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			//gorb2 left
+			CloudRGB = Vector(240,226,121);
+			start= -23-step, end= 25.5;					
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+			//lev 3
+			// center
+			pitch=AVG(-14.f, -25.f), step=AVG(-14.f, 25.f);
+			CloudRGB = AVG(  Vector(251,245,211),  Vector(255,253,235)  );
+			start= -73.8, end= -45.5;
+				ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB);//  /3.f );
+		}
+
+		else if(  !strnicmp( skyname,"sky_day01_07", 12 )  )  //  d1_canals_12
+		{
+			// lev 1
+			//yellow
+			pitch=AVG(-4.f, 0.f), step=AVG(4.f, 0.f);
+			CloudRGB = AVG(  Vector(238,240,164),  Vector(239,240,192)  );
+			start= -112.5, end= -36.8;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// greenish yellow					
+			CloudRGB = Vector(232,233,176);
+			start= -36.8, end= 57;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// pink					
+			CloudRGB = Vector(233,204,144);
+			start= 57, end= 93.5;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// more yellow					
+			CloudRGB = Vector(238,228,153);
+			start= -93.5, end= 0;	ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			start= 0, end= 128.5;	ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// more pink					
+			CloudRGB = Vector(210,162,106);
+			start= 128.5, end= 147.5;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// lev 2
+			// right
+			pitch=AVG(-4.f, -5.f), step=AVG(-4.f, 5.f);
+			CloudRGB = Vector(251,245,211);
+			start= -110, end= -98;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// center
+			pitch=AVG(-4.f, -8.f), step=AVG(-4.f, 8.f);
+			CloudRGB = Vector(251,245,211);
+			start= -80.84, end= -61;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+
+		else if(  !strnicmp( skyname,"sky_day01_08", 12 )  )  //  d1_canals_13, d1_eli_01
+		{
+			// lev 1
+			//left
+			pitch=AVG(-6.5f, 0.f), step=AVG(6.5f, 0.f);
+			CloudRGB = Vector(221,183,109);
+			start= -140, end= -91+step;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//cent					
+			CloudRGB = Vector(229,233,173);
+			start= -91-step, end= -61+step;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//right					
+			CloudRGB = Vector(219,199,144);
+			start= -61-step, end= -11.5+step;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			//lev 2
+			//cent
+			pitch=AVG(-6.5f, -14.5f), step=AVG(-6.5f, 14.5f);
+			CloudRGB = Vector(220,142,76);
+			start= -111, end= -53;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+		else if(  !strnicmp( skyname,"sky_day02_01", 12 )  )  //  town05
+		{
+			CloudRGB = Vector(208,222,231);
+			// major halo
+			pitch = -25, step=12.5f;			
+			start = 114.5f-40, end = 114.5f+30;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+			// minor halo over horizon
+			pitch = 0, step=12.5f;
+			start = 15, end = 195;
+			ParseCloudlight( e, dl, pitch, start, end, step, CloudRGB );
+		}
+		else
+		{
+			bPredictionPass = false;
+			g_bCloudlight = false;
+		}
+
+		if( bPredictionPass )
+		{
+			printf("%.f sq deg cloud area of skybox\n", TotalCloudArea );
+			if(  TotalCloudArea  )
+				cumulRGB /= TotalCloudArea;
+			printf("renormalized cumulRGB: %.f %.f %.f\n", cumulRGB[0],cumulRGB[1],cumulRGB[2] );
+			cumulRGB = vecZero;
+
+			bPredictionPass = false;
+			goto WorkPass; //  BUGBUG?
+		}
+//		else
+//			printf("doublecheck cumulRGB: %.f %.f %.f\n", cumulRGB[0],cumulRGB[1],cumulRGB[2] );
+	}
+	//  end of cloudlight code
+
+
+
+	//  now that we know cloudlight energy we can subtract it from Valve's sun to keep original brightness
+	for (i=0; i<(unsigned)num_entities ; i++)
+	{
+		e = &entities[i];
+		name = ValueForKey (e, "classname");
+		if( !strcmp( name, "light_environment" )  &&  !g_bSkipSunlight_Skylight  )
+		{
+		//	Msg("found light_environment...\n" );
+			ParseLightEnvironment( e, dl );
+		}
+		if( !strcmp( name, "light_environment" ) )
+			GetVectorForKey(e, "origin", vecLightEnvOrigin );
+	}
+	
+	
+
+
+	
+	// deallocate prop arrays
+	if( g_bLightingFixes )
+	{
+//		Warning("deallocating stretched arrays\n");
+
+		delete[]BulbOrg;
+		delete[]BulbAngles;
+
+		delete[]FluorOrg;
+		delete[]FluorAngles;
+
+		delete[]OmnifluorOrg;
+		delete[]OmnifluorAngles;
+
+		delete[]NozzleOrg;
+		delete[]NozzleAngles;
+
+		delete[]NotadeviceOrg;
+		delete[]NotadeviceAngles;
+	}
 	
 
 	qprintf ("%i direct lights\n", numdlights);
@@ -3171,7 +3331,6 @@ void ExportDirectLightsToWorldLights()
 		// FIXME: why does vrad want 0 to 255 and not 0 to 1??
 		VectorScale( dl->light.intensity, (1.0 / 255.0), wl->intensity );
 		VectorCopy( dl->light.normal, wl->normal );
-//		Msg("world light with normal %.3f %.3f\n", wl->normal[0], wl->normal[1]);
 		wl->stopdot	= dl->light.stopdot;
 		wl->stopdot2 = dl->light.stopdot2;
 		wl->exponent = dl->light.exponent;
@@ -3195,7 +3354,7 @@ void ExportDirectLightsToWorldLights()
 #define NSAMPLES_SUN_AREA_LIGHT 30							// number of samples to take for an
                                                             // non-point sun light
 
-// Helper function - gathers light from sun (emit_skylight)
+// Helper function - gathers light from sun (emit_sunlight)
 void GatherSampleSkyLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, int facenum, 
 							 FourVectors const& pos, FourVectors *pNormals, int normalCount, int iThread,
 							 int nLFlags, int static_prop_index_to_ignore,
@@ -3219,9 +3378,8 @@ void GatherSampleSkyLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, i
 	int nsamples = 1;
 
 
-	if ( g_SunAngularExtent > 0.0f )
+	if ( g_SunAngularExtent > 0.0f  ||  g_bCloudlight )
 	{
-
 		nsamples = NSAMPLES_SUN_AREA_LIGHT;
 		if ( do_fast || force_fast )
 			nsamples /= 4;
@@ -3236,16 +3394,21 @@ void GatherSampleSkyLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, i
 	for ( int d = 0; d < nsamples; d++ )
 	{
 		// determine visibility of skylight
-		// serach back to see if we can hit a sky brush
+		// search back to see if we can hit a sky brush
 		Vector delta;
 		VectorScale( dl->light.normal, -MAX_TRACE_LENGTH, delta );
 		if ( d )
 		{
 			// jitter light source location
-			Vector ofs = sampler.NextValue();
-			ofs *= MAX_TRACE_LENGTH * g_SunAngularExtent;
-			delta += ofs;
+			//  get rnd 3-comp normal, range of all components -1...1
+			Vector RandomNormalizedNormal = sampler.NextValue();
+			if( g_bCloudlight )
+				RandomNormalizedNormal *= MAX_TRACE_LENGTH * Vector( dl->light.stopdot, dl->light.stopdot2, 1.f );
+			else
+				RandomNormalizedNormal *= MAX_TRACE_LENGTH * g_SunAngularExtent;
+			delta += RandomNormalizedNormal;
 		}
+
 		FourVectors delta4;
 		delta4.DuplicateVector ( delta );
 		delta4 += pos;
@@ -3254,7 +3417,10 @@ void GatherSampleSkyLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, i
 
 		totalFractionVisible = AddSIMD ( totalFractionVisible, fractionVisible );
 	}
+//				Warning("output: dl %i sunext %.f %.f\n", (int)dl/sizeof(directlight_t),
+//				dl->light.stopdot, dl->light.stopdot2 );
 
+	//  find average
 	fltx4 seeAmount = MulSIMD ( totalFractionVisible, ReplicateX4 ( 1.0f / nsamples ) );
 	out.m_flDot[0] = MulSIMD ( dot, seeAmount );
 	out.m_flFalloff = Four_Ones;
@@ -3418,11 +3584,11 @@ void GatherSampleStandardLightSSE( SSE_sampleLightOutput_t &out, directlight_t *
 		linear    = ReplicateX4( dl->light.linear_attn );
 		quadratic = ReplicateX4( dl->light.quadratic_attn );
 
-		out.m_flFalloff = MulSIMD( falloffEvalDist, falloffEvalDist );
-		out.m_flFalloff = MulSIMD( out.m_flFalloff, quadratic );
-		out.m_flFalloff = AddSIMD( out.m_flFalloff, MulSIMD( linear, falloffEvalDist ) );
-		out.m_flFalloff = AddSIMD( out.m_flFalloff, constant );
-		out.m_flFalloff = ReciprocalSIMD( out.m_flFalloff );
+		out.m_flFalloff = MulSIMD( falloffEvalDist, falloffEvalDist );						//faloff=range*range
+		out.m_flFalloff = MulSIMD( out.m_flFalloff, quadratic );							//faloff*=quadratic;
+		out.m_flFalloff = AddSIMD( out.m_flFalloff, MulSIMD( linear, falloffEvalDist ) );	//faloff+=linear*range;
+		out.m_flFalloff = AddSIMD( out.m_flFalloff, constant );								//faloff+=constant;
+		out.m_flFalloff = ReciprocalSIMD( out.m_flFalloff );								//faloff=1/faloff;
 		break;
 
 	case emit_surface:
@@ -3512,11 +3678,13 @@ void GatherSampleStandardLightSSE( SSE_sampleLightOutput_t &out, directlight_t *
 	fltx4 fractionVisible = Four_Ones;
 	TestLine( pos, src, &fractionVisible, static_prop_index_to_ignore);
 	dot = MulSIMD( fractionVisible, dot );
-	out.m_flDot[0] = dot;//it was here
-	/*fltx4 positMap = CmpGtSIMD( dot, Four_Zeros );
-	out.m_flDot[0] = AndSIMD( Four_Ones, positMap );*/ //fiv: infinite lights
+	out.m_flDot[0] = dot;
+	/*
+	fltx4 positMap = CmpGtSIMD( dot, Four_Zeros );
+	out.m_flDot[0] = AndSIMD( Four_Ones, positMap );
+	*/ //fiv: infinite lights
 
-	//fiv: CmpGtSIMD means compare if greater than
+	//fiv: CmpGtSIMD means "compare if greater than"
 
 	
 	for ( int i = 1; i < normalCount; i++ )
@@ -3543,6 +3711,10 @@ void GatherSampleLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, int 
 					   int static_prop_index_to_ignore,
 					   float flEpsilon )
 {
+
+	
+
+
 	for ( int b = 0; b < normalCount; b++ )
 		out.m_flDot[b] = Four_Zeros;
 	out.m_flFalloff = Four_Zeros;
@@ -3552,12 +3724,10 @@ void GatherSampleLightSSE( SSE_sampleLightOutput_t &out, directlight_t *dl, int 
 	// skylights work fundamentally differently than normal lights
 	switch( dl->light.type )
 	{
-	case emit_skylight:
-		{
-			GatherSampleSkyLightSSE( out, dl, facenum, pos, pNormals, normalCount,
+	case emit_sunlight:
+		GatherSampleSkyLightSSE( out, dl, facenum, pos, pNormals, normalCount,
 									 iThread, nLFlags, static_prop_index_to_ignore, flEpsilon );
-			break;
-		}
+		break;
 
 	case emit_skyambient:
 		GatherSampleAmbientSkySSE( out, dl, facenum, pos, pNormals, normalCount,
@@ -4050,15 +4220,9 @@ static void GatherSampleLightAt4Points( SSE_SampleInfo_t& info, int sampleIdx, i
 			continue;
 
 
-		if( g_bCloudLight )
-		{
-			g_SunAngularExtent = sin(M_PI/180.0)*1;
-			if( g_bCloudLight && dl->light.type==emit_skylight && dl->light.origin.Length() == 0 )
-			{
-				g_SunAngularExtent = dl->light.radius;
-			//	printf("sun %.f %.f %.f\n", dl->light.origin.x,dl->light.origin.y,dl->light.origin.z);
-			}
-		}
+
+		
+		
 		GatherSampleLightSSE( out, dl, info.m_FaceNum, info.m_Points, info.m_PointNormals, info.m_NormalCount, info.m_iThread );
 		
 		// Apply the PVS check filter and compute falloff x dot
@@ -4083,7 +4247,7 @@ static void GatherSampleLightAt4Points( SSE_SampleInfo_t& info, int sampleIdx, i
 		{
 			if (info.m_WarnFace != info.m_FaceNum)
 			{
-				Warning ("\nWARNING: Too many light styles on a face at (%f, %f, %f)\n",
+				Warning ("WARNING: Too many light styles on a face at (%f, %f, %f)\n",
 					info.m_Points.x.m128_f32[0], info.m_Points.y.m128_f32[0], info.m_Points.z.m128_f32[0] );
 				info.m_WarnFace = info.m_FaceNum;
 			}
@@ -4165,15 +4329,7 @@ static void ResampleLightAt4Points( SSE_SampleInfo_t& info, int lightStyleIndex,
 		// (tested by checking the dot product of the face normal and the light position)
 		// we don't want it to contribute to *any* of the bumped lightmaps. It glows
 		// in disturbing ways if we don't do this.
-		if( g_bCloudLight )
-		{
-			g_SunAngularExtent = sin(M_PI/180.0)*1;
-			if( g_bCloudLight && dl->light.type==emit_skylight && dl->light.origin.Length() == 0 )
-			{
-				g_SunAngularExtent = dl->light.radius;
-			//	printf("sun %.f %.f %.f\n", dl->light.origin.x,dl->light.origin.y,dl->light.origin.z);
-			}
-		}
+		
 		GatherSampleLightSSE( out, dl, info.m_FaceNum, info.m_Points, info.m_PointNormals, info.m_NormalCount, info.m_iThread );
 
 		// Apply the PVS check filter and compute falloff x dot
@@ -4404,12 +4560,8 @@ static inline void ComputeLuxelIntensity( SSE_SampleInfo_t& info, int sampleIdx,
 	for (int n = 0; n < info.m_NormalCount; ++n)
 	{
 		float intensity = ppLightSamples[n][sampleIdx].Intensity();
-
-		//if (g_bConvertLightsourceGamma)
-			// convert to a linear perception space
-			pSampleIntensity[n * info.m_LightmapSize + destIdx] = pow( intensity / 256.0, 1.0 / 2.2 );
-		//else
-		//	pSampleIntensity[n * info.m_LightmapSize + destIdx] = intensity;
+		// convert to a linear perception space
+		pSampleIntensity[n * info.m_LightmapSize + destIdx] = pow( intensity / 256.0, 1.0 / 2.2 );
 	}
 }
 
@@ -4792,20 +4944,17 @@ void BuildPatchLights( int facenum )
 		{
 			pNextPatch = &g_Patches.Element( patch->ndxNext );
 		}
+	
+		// skip patches without parents
+		if( patch->parent == g_Patches.InvalidIndex()   )
+//		if (patch->parent == -1)
+			continue;
 
-//		if(  !g_bSkipChildren  )  //  a little dark
-		{
-			// skip patches without parents
-			if( patch->parent == g_Patches.InvalidIndex()   )
-	//		if (patch->parent == -1)
-				continue;
+		CPatch *parent = &g_Patches.Element( patch->parent );
 
-
-			CPatch *parent = &g_Patches.Element( patch->parent );
-
-			parent->samplearea += patch->samplearea;
-			VectorAdd( parent->samplelight, patch->samplelight, parent->samplelight );
-		}
+		parent->samplearea += patch->samplearea;
+		VectorAdd( parent->samplelight, patch->samplelight, parent->samplelight );
+		
 	}
 
 	// average up the direct light on each patch for radiosity
@@ -4843,7 +4992,7 @@ void BuildPatchLights( int facenum )
 			pNextPatch = &g_Patches.Element( patch->ndxNext );
 		}
 
-		if ( patch->child1 != g_Patches.InvalidIndex()  &&  !g_bSkipChildren )
+		if ( patch->child1 != g_Patches.InvalidIndex()  &&  g_bPullFromChildren )
 		{
 			float s1, s2;
 			CPatch *child1;
@@ -5039,6 +5188,7 @@ static void ColorClampBumped( Vector& color1, Vector& color2, Vector& color3 )
 	if( color3[2] < 0.f ) color3[2] = 0.f;
 }
 
+//  not used? - fiv
 static void LinearToBumpedLightmap(
 	const float		*linearColor, 
 	const float		*linearBumpColor1,

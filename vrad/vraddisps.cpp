@@ -1058,7 +1058,10 @@ radial_t *CVRadDispMgr::BuildLuxelRadial( int ndxFace, int ndxStyle, bool bBump 
 bool CVRadDispMgr::SampleRadial( int ndxFace, radial_t *pRadial, Vector const &vPos, int ndxLxl,
 								 LightingValue_t *pLightSample, int sampleCount, bool bPatch )
 {
+	extern bool g_bLightingFixes, g_bHDR, has_env_sun;
+	extern float fAmbientIntensity;
 	bool bGoodSample = true;
+	float ceiling = 128, floor = 0;//max( 32, fAmbientIntensity-32 );
 	for ( int count = 0; count < sampleCount; count++ )
 	{
 		pLightSample[count].Zero();
@@ -1066,6 +1069,9 @@ bool CVRadDispMgr::SampleRadial( int ndxFace, radial_t *pRadial, Vector const &v
 		if ( pRadial->weight[ndxLxl] > 0.0f )
 		{
 			pLightSample[count].AddWeighted( pRadial->light[count][ndxLxl], ( 1.0f / pRadial->weight[ndxLxl] ) );
+			//  control brightness limits of displacements separately
+			if( g_bLightingFixes  &&  !g_bHDR  &&  has_env_sun )
+				pLightSample[count].Renormalize( ceiling, floor );
 		}
 		else
 		{
@@ -1088,6 +1094,7 @@ bool CVRadDispMgr::SampleRadial( int ndxFace, radial_t *pRadial, Vector const &v
 //-----------------------------------------------------------------------------
 void GetPatchLight( CPatch *pPatch, bool bBump, Vector *pPatchLight )
 {
+	//  i wonder if it is the case of "totallight has a copy of the direct lighting.  Move it to the emitted light and zero it out (to integrate bounces only)"
 	VectorCopy( pPatch->totallight.light[0], pPatchLight[0] );
 
 	if( bBump )

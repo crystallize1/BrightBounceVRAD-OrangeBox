@@ -61,7 +61,6 @@ extern float g_MaxDispPatchRadius;
 struct Ray_t;
 
 #define		TRANSFER_EPSILON		0.0000001
-#define		TRANSFER_SCALE			16384.0f
 
 struct directlight_t
 {
@@ -132,6 +131,27 @@ struct LightingValue_t
 	{
 		m_vecLighting.Init( 0, 0, 0 );
 		m_flDirectSunAmount = 0.0;
+	}
+
+	FORCEINLINE void Renormalize( float ceiling, float floor )
+	{		
+	//	extern float fAmbientIntensity;
+
+		float max = VectorMaximum( m_vecLighting );
+		float min = VectorMinimum( m_vecLighting );
+
+		if( max  &&  max>ceiling )
+		{
+			VectorScale( m_vecLighting, ceiling/max, m_vecLighting );
+		}
+		else if( min  &&  min<floor )
+		{
+			VectorScale( m_vecLighting, floor/min, m_vecLighting );
+
+//			m_vecLighting[0]= floor;
+//			m_vecLighting[1]= floor;
+//			m_vecLighting[2]= floor;
+		}
 	}
 	
 	FORCEINLINE void Scale( float m_flScale )

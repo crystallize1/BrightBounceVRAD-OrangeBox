@@ -39,28 +39,40 @@
 
 
 #define ALIGN_TO_POW2(x,y) (((x)+(y-1))&~(y-1))
-#define MapQAngleAsVector( a,v ){ v[0]=a[0];v[1]=a[1];v[2]=a[2]; }
 
-const int propcap = 600;
-int propcount;
-Vector bulbproporg[propcap];
-Vector bulbpropang[propcap];//storing prop angs can be useful
+#define PROPTYPE_UNKNOWN 0;
+#define PROPTYPE_BULB 1;
+#define PROPTYPE_FLUOR 2;
+#define PROPTYPE_OMNIFLUOR 3;
+#define PROPTYPE_NOZZLE 4;
+#define PROPTYPE_NOTADEVICE 5;
 
-Vector fluorproporg[propcap];
-Vector fluorpropang[propcap];
-
-Vector nozzleproporg[propcap];
-Vector nozzlepropang[propcap];
-
-Vector projproporg[propcap];
-Vector projpropang[propcap];
-
-int iBulb = -1, iFluor = -1, iNozzle = -1, iProj = -1;
+int nBulb = 0, nFluor = 0, nOmnifluor = 0, nNozzle = 0, nNotadevice = 0;
 
 char *propDict = (char *)malloc( sizeof(propDict) );
-extern bool g_bSkipFakeLights;
-extern bool g_bCloudLight;
-int propmodelidx[propcap];//ref to num in prop dict
+
+extern Vector TonemappingWithAnchor( Vector vecInput );
+extern float g_fTonemappingGamma;
+
+extern Vector RenormalizeLighting( Vector vecInput );
+extern float TargetLuxelIntensity;
+
+extern bool g_bLightingFixes;
+
+extern Vector *BulbOrg;
+extern Vector *BulbAngles;
+
+extern Vector *FluorOrg;
+extern Vector *FluorAngles;
+
+extern Vector *OmnifluorOrg;
+extern Vector *OmnifluorAngles;
+
+extern Vector *NozzleOrg;
+extern Vector *NozzleAngles;
+
+extern Vector *NotadeviceOrg;
+extern Vector *NotadeviceAngles;
 
 // identifies a vertex embedded in solid
 // lighting will be copied from nearest valid neighbor
@@ -119,6 +131,7 @@ public:
 	void ComputeLighting( int iThread );
 
 private:
+
 	// VMPI stuff.
 	static void VMPI_ProcessStaticProp_Static( int iThread, uint64 iStaticProp, MessageBuffer *pBuf );
 	static void VMPI_ReceiveStaticPropResults_Static( uint64 iStaticProp, MessageBuffer *pBuf, int iWorker );
@@ -879,7 +892,28 @@ void CVradStaticPropMgr::UnserializeModelDict( CUtlBuffer& buf )
 
 void CVradStaticPropMgr::UnserializeModels( CUtlBuffer& buf )
 {
+	extern Vector vecZero;
 	int count = buf.GetInt();
+
+	if( g_bLightingFixes )
+	{
+//		Warning("stretching arrays (count %i)\n", count );
+
+		BulbOrg = new Vector[count]; memset( BulbOrg, 0, count*sizeof(Vector) );
+		BulbAngles = new Vector[count]; memset( BulbAngles, 0, count*sizeof(Vector) );
+
+		FluorOrg = new Vector[count]; memset( FluorOrg, 0, count*sizeof(Vector) );
+		FluorAngles = new Vector[count]; memset( FluorAngles, 0, count*sizeof(Vector) );
+
+		OmnifluorOrg = new Vector[count]; memset( OmnifluorOrg, 0, count*sizeof(Vector) );
+		OmnifluorAngles = new Vector[count]; memset( OmnifluorAngles, 0, count*sizeof(Vector) );
+
+		NozzleOrg = new Vector[count]; memset( NozzleOrg, 0, count*sizeof(Vector) );
+		NozzleAngles = new Vector[count]; memset( NozzleAngles, 0, count*sizeof(Vector) );
+
+		NotadeviceOrg = new Vector[count]; memset( NotadeviceOrg, 0, count*sizeof(Vector) );
+		NotadeviceAngles = new Vector[count]; memset( NotadeviceAngles, 0, count*sizeof(Vector) );
+	}
 
 	m_StaticProps.AddMultipleToTail(count);
 	for ( int i = 0; i < count; ++i )				  
@@ -895,6 +929,8 @@ void CVradStaticPropMgr::UnserializeModels( CUtlBuffer& buf )
 		m_StaticProps[i].m_Handle = TREEDATA_INVALID_HANDLE;
 		m_StaticProps[i].m_Flags = lump.m_Flags;
 	}
+
+	
 }
 
 //-----------------------------------------------------------------------------
@@ -1021,11 +1057,17 @@ void ComputeDirectLightingAtPoint( Vector &position, Vector &normal, Vector &out
 		Vector adjusted_pos = position;
 		float flEpsilon = 0.0;
 
-		if  (dl->light.type != emit_skyambient)
+		if  (dl->light.type == emit_skyambient)
+		{
+			// push out along normal
+			adjusted_pos += 4.0 * normal;
+//			flEpsilon = 1.0;
+		}
+		else
 		{
 			// push towards the light
 			Vector fudge;
-			if ( dl->light.type == emit_skylight )
+			if ( dl->light.type == emit_sunlight )
 				fudge = -( dl->light.normal);
 			else
 			{
@@ -1035,31 +1077,22 @@ void ComputeDirectLightingAtPoint( Vector &position, Vector &normal, Vector &out
 			fudge *= 4.0;
 			adjusted_pos += fudge;
 		}
-		else 
-		{
-			// push out along normal
-			adjusted_pos += 4.0 * normal;
-//			flEpsilon = 1.0;
-		}
+		
 
 		FourVectors adjusted_pos4;
 		FourVectors normal4;
 		adjusted_pos4.DuplicateVector( adjusted_pos );
 		normal4.DuplicateVector( normal );
 
-		if( g_bCloudLight )
-		{
-			g_SunAngularExtent = sin(M_PI/180.0)*1;
-			if( g_bCloudLight && dl->light.type==emit_skylight && dl->light.origin.Length() == 0 )
-			{
-				g_SunAngularExtent = dl->light.radius;
-			//	printf("sun %.f %.f %.f\n", dl->light.origin.x,dl->light.origin.y,dl->light.origin.z);
-			}
-		}
+
+		
+		
 		GatherSampleLightSSE( sampleOutput, dl, -1, adjusted_pos4, &normal4, 1, iThread, nLFlags | GATHERLFLAGS_FORCE_FAST,
 		                      static_prop_id_to_skip, flEpsilon );
 		
 		VectorMA( outColor, sampleOutput.m_flFalloff.m128_f32[0] * sampleOutput.m_flDot[0].m128_f32[0], dl->light.intensity, outColor );
+
+
 	}
 }
 
@@ -1108,7 +1141,7 @@ void CVradStaticPropMgr::ApplyLightingToStaticProp( CStaticProp &prop, const CCo
 						for ( int nVertex = 0; nVertex < pStripGroup->numVerts; ++nVertex )
 						{
 							int nIndex = pMesh->vertexoffset + pStripGroup->pVertex( nVertex )->origMeshVertID;
-
+							
 							Assert( nIndex < pStudioModel->numvertices );
 							prop.m_MeshData[nMeshIdx].m_Verts[nVertex] = colorVerts[nIndex].m_Color;
 						}
@@ -1140,7 +1173,13 @@ void CVradStaticPropMgr::ComputeLighting( CStaticProp &prop, int iThread, int pr
 
 	if (prop.m_Flags & STATIC_PROP_NO_PER_VERTEX_LIGHTING )
 		return;
-
+/*
+	if( !strnicmp( pStudioHdr->name, "props_wasteland\rockcliff_cluster02b.mdl", 40 ) )
+	{
+		printf("skipping %s\n", pStudioHdr->name );
+		return;
+	}
+*/
 	VMPI_SetCurrentStage( "ComputeLighting" );
 	
 	for ( int bodyID = 0; bodyID < pStudioHdr->numbodyparts; ++bodyID )
@@ -1175,6 +1214,10 @@ void CVradStaticPropMgr::ComputeLighting( CStaticProp &prop, int iThread, int pr
 					VectorTransform( *vertData->Position( vertexID ), matrix, samplePosition );
 					AngleMatrix( prop.m_Angles, matrix );
 					VectorTransform( *vertData->Normal( vertexID ), matrix, sampleNormal );
+
+
+				//	for( tmp=pStudioHdr->name; *tmp && *tmp!='.'; tmp++ )
+				//		if( !strnicmp(tmp,"rockcliff_cluster",17)
 
 					if ( PositionInSolid( samplePosition ) )
 					{
@@ -1218,9 +1261,20 @@ void CVradStaticPropMgr::ComputeLighting( CStaticProp &prop, int iThread, int pr
 						}
 						
 						colorVerts[numVertexes].m_bValid = true;
-						colorVerts[numVertexes].m_Position = samplePosition;
+						colorVerts[numVertexes].m_Position = samplePosition;	
+
 						VectorAdd( directColor, indirectColor, colorVerts[numVertexes].m_Color );
-					}
+
+
+						if( g_fTonemappingGamma != 1.0f )
+							colorVerts[numVertexes].m_Color = TonemappingWithAnchor( colorVerts[numVertexes].m_Color );
+
+						if( !TargetLuxelIntensity && !g_bHDR )
+							TargetLuxelIntensity = 512; // lightmap intensity doubling
+						if( TargetLuxelIntensity )
+							colorVerts[numVertexes].m_Color = RenormalizeLighting( colorVerts[numVertexes].m_Color );
+					
+						}
 					
 					numVertexes++;
 				}
@@ -1288,8 +1342,19 @@ void CVradStaticPropMgr::ComputeLighting( CStaticProp &prop, int iThread, int pr
 
 					// save results, not changing valid status
 					// to ensure this offset position is not considered as a viable candidate
-					colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Position = bestPosition;
+					
+					colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Position = bestPosition;	
+
 					VectorAdd( directColor, indirectColor, colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Color );
+
+
+					if( g_fTonemappingGamma != 1.0f )
+						colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Color = TonemappingWithAnchor( colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Color );
+
+					if( !TargetLuxelIntensity && !g_bHDR )
+						TargetLuxelIntensity = 512;
+					if( TargetLuxelIntensity )
+						colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Color = RenormalizeLighting( colorVerts[badVerts[nBadVertex].m_ColorVertex].m_Color );
 				}
 			}
 			
@@ -1318,6 +1383,8 @@ void CVradStaticPropMgr::SerializeLighting()
 	char mapName[MAX_PATH];
 	Q_FileBase( source, mapName, sizeof( mapName ) );
 
+	
+
 	int size;
 	for (int i = 0; i < count; ++i)
 	{
@@ -1325,6 +1392,7 @@ void CVradStaticPropMgr::SerializeLighting()
 		// props marked this way will not load the info anyway 
 		if ( m_StaticProps[i].m_Flags & STATIC_PROP_NO_PER_VERTEX_LIGHTING )
 			continue;
+		
 
 		if (g_bHDR)
 		{
@@ -1532,6 +1600,95 @@ bool Axial( float angle )
 		return true;
 }
 
+bool FindOmnifluorsByName( char *tmp, Vector propOrg, Vector propAngles, int propModelIdx )
+{
+	for( tmp; *tmp && *tmp!='.'; tmp++ )
+	{
+		if( !strnicmp( tmp,"lab_flourescentlight002b", 24 )
+		|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
+		{
+			VectorCopy( propOrg, OmnifluorOrg[nOmnifluor] );
+			VectorCopy( propAngles, OmnifluorAngles[nOmnifluor] );
+
+			// tweaks
+			if( !strnicmp( tmp,"lab_flourescentlight002b", 24 )
+			|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
+			{
+				Vector fwd;
+				AngleVectors( QAngle(propAngles[0],propAngles[1],propAngles[2]), &fwd );
+				VectorMA( OmnifluorOrg[nOmnifluor], 0.3f, fwd, OmnifluorOrg[nOmnifluor] ); // aligh to backside of glass tube
+			}
+
+			printf( "  omnifluor %i: model %s prop %i pos %.f %.f\n",
+				nOmnifluor, tmp, propModelIdx,
+				OmnifluorOrg[nOmnifluor][0], OmnifluorOrg[nOmnifluor][1] );
+
+			nOmnifluor++;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FindFluorsByName( char *tmp, Vector propOrg, Vector propAngles, int propModelIdx )
+{
+	for( tmp; *tmp && *tmp!='.'; tmp++ )
+	{
+		if( !strnicmp(tmp,"Lights_Florescent",17)
+		|| !strnicmp( tmp,"prison_flourescentlight",23 )
+		|| !strnicmp( tmp,"lab_flourescentlight",20 )	)
+		{
+			VectorCopy( propOrg, FluorOrg[nFluor] );					
+			VectorCopy( propAngles, FluorAngles[nFluor] );
+
+			FluorAngles[nFluor].x *= -1;
+			FluorAngles[nFluor].x += -90;//assume axial
+
+			//tweaks
+			if( !strnicmp( tmp,"lab_flourescentlight001a",24 )
+			|| !strnicmp( tmp,"prison_flourescentlight001a",27 ) )
+				FluorOrg[nFluor].z += -33;
+			else if( !strnicmp( tmp,"prison_flourescentlight001b",27 )//before we meet alyx
+			|| !strnicmp( tmp,"lab_flourescentlight001b",24 ) )
+				FluorOrg[nFluor].z += -73+3;
+			
+			printf( "\tfluor %i: %s pos %.f %.f %.f ang %.f %.f model %i\n",
+				nFluor, tmp, 
+				FluorOrg[nFluor].x, FluorOrg[nFluor].y, FluorOrg[nFluor].z, 
+				FluorAngles[nFluor][0], FluorAngles[nFluor][1], 
+				propModelIdx );
+			
+			nFluor++;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool FindNotadevicesByName( char *tmp, Vector propOrg, Vector propAngles, int propModelIdx )
+{
+	for( tmp; *tmp && *tmp!='.'; tmp++ )
+	{
+		if(	!strnicmp( tmp, "prison_cellwindow002a", 21 )
+		||  !strnicmp( tmp, "metalladder002", 14 )	)
+		{
+			VectorCopy( propOrg, NotadeviceOrg[nNotadevice] );
+			VectorCopy( propAngles, NotadeviceAngles[nNotadevice] );
+
+			// tweaks
+			if( !strnicmp(tmp,"prison_cellwindow002a",21 ) )//hack
+				NotadeviceOrg[nNotadevice].z += 16;//so we have cool shadows from grate
+
+			printf( "  not a device %i: model %s prop %i pos %.f %.f\n",
+				nNotadevice, tmp, propModelIdx,
+				NotadeviceOrg[nNotadevice][0], NotadeviceOrg[nNotadevice][1] );
+			
+			nNotadevice++;
+			return true;
+		}
+	}
+	return false;  
+}
 
 
 
@@ -1541,21 +1698,8 @@ bool Axial( float angle )
 //-----------------------------------------------------------------------------
 void CVradStaticPropMgr::AddPolysForRayTrace( void )
 {
-
 	int count = m_StaticProps.Count();
 	//placements on the map! not dictionary of unique models!
-	
-	if( g_bSkipFakeLights )
-	{
-		// keep it on: insufficient propcap cause weird glitches
-		propcount = count;
-		printf( "propcount %i, propcap %i\n", propcount, propcap );
-		if ( propcount > propcap )
-		{
-			printf( "RAISE PROPCAP!\n" );
-			CmdLib_Exit( 1 );
-		}
-	}
 
 	if ( !count )
 	{
@@ -1563,267 +1707,235 @@ void CVradStaticPropMgr::AddPolysForRayTrace( void )
 		return;
 	}
 
-	if( g_bSkipFakeLights )
+	int iPropType, propModelIdx;
+	Vector propOrg, propAngles;
+
+	Warning("\tList all the lighting device props on the map:\n" );
+	for ( int nProp = 0; nProp < count; ++nProp )
 	{
-		#define PROPTYPE_UNKNOWN 0;
-		#define PROPTYPE_BULB 1;
-		#define PROPTYPE_FLUOR 2;
-		#define PROPTYPE_NOZZLE 3;
-	
-		int iPropType = PROPTYPE_UNKNOWN;
-		char *name;
-		char *tmp;
+		if( !g_bLightingFixes )
+			break;
 
-		printf("\tList all the lighting device props on the map:\n" );
+		iPropType = PROPTYPE_UNKNOWN;
 
-		for ( int i = 0; i < count; ++i )
+		CStaticProp &prop = m_StaticProps[nProp];
+		StaticPropDict_t &dict = m_StaticPropDict[prop.m_ModelIdx];		
+		VectorCopy( prop.m_Origin, propOrg );
+		propAngles[0]=prop.m_Angles[0];
+		propAngles[1]=prop.m_Angles[1];
+		propAngles[2]=prop.m_Angles[2];
+		propModelIdx = prop.m_ModelIdx;
+
+		//  find omnifluors
+		if(  FindOmnifluorsByName(dict.m_pStudioHdr->name, propOrg, propAngles, propModelIdx)  )
+			continue;
+
+		//find bulbs
+		for( char *tmp=dict.m_pStudioHdr->name; *tmp && *tmp!='.'; tmp++ )
 		{
-			iPropType = PROPTYPE_UNKNOWN;
-			propmodelidx[i] = m_StaticProps[i].m_ModelIdx;
-			name = m_StaticPropDict[ propmodelidx[i] ].m_pStudioHdr->name;
-			if( !name )break;
-
-			//find fluors
-			for( tmp=name; *tmp && *tmp!='.'; tmp++ )
+			//bulbs
+			if( !strnicmp( tmp, "lightbulb", 9 )
+//			|| !strnicmp( tmp, "light_cagelight", 15 )
+//			|| !strnicmp( tmp, "prison_cagedlight", 17 )
+			|| !strnicmp( tmp, "light_domelight", 15 )
+			//  nozzles too
+/*			|| !strnicmp( tmp,"prison_lamp001a", 15 )
+			|| !strnicmp( tmp,"prison_lamp001b", 15 )
+			|| !strnicmp( tmp,"prison_lamp001c", 15 )
+			|| !strnicmp( tmp,"LampFixture01a", 14)
+			|| !strnicmp( tmp, "combine_light", 13 )
+			|| !strnicmp( tmp, "light_spotlight01_lamp", 22 ) 
+			|| !strnicmp( tmp, "light_spotlight02_lamp", 22 )
+			|| !strnicmp( tmp, "lamp_bell_on", 12 )
+			|| !strnicmp( tmp, "light_decklight01_on", 20 )
+			|| !strcmp( tmp, "combine_intmonitor001.mdl" )
+			|| !strcmp( tmp, "LightTowerCluster01.mdl" )
+			|| !strcmp( tmp, "walllight001a.mdl" )	*/
+			)
 			{
-				if( !strnicmp(tmp,"Lights_Florescent01a",20)
-					|| !strnicmp( tmp,"prison_flourescentlight001a",27 )
-					|| !strnicmp( tmp,"prison_flourescentlight001b",27 )
-					|| !strnicmp( tmp,"lab_flourescentlight001a",24 )
-					|| !strnicmp( tmp,"lab_flourescentlight001b",24 ) )
-				{
-					iPropType=PROPTYPE_FLUOR;
-					iFluor++;
+				VectorCopy( propOrg, BulbOrg[nBulb] );
 
-					VectorCopy( m_StaticProps[i].m_Origin, fluorproporg[iFluor] );					
-					MapQAngleAsVector( m_StaticProps[i].m_Angles, fluorpropang[iFluor] );
+				// tweaks
+				if( !strnicmp( tmp,"Lightbulb01a",12 ) )
+					BulbOrg[nBulb].z += 10;
+				else if( !strnicmp( tmp,"Lightbulb03a",12 ) )
+					BulbOrg[nBulb].z += -52;
+							// nozzles too
+							else if( !strnicmp( tmp,"prison_lamp001a",15 ) )//hanging small canals11
+								BulbOrg[nBulb].z -= 10;
+							else if( !strnicmp( tmp,"prison_lamp001b",15 ) )//hanging large trst02
+								BulbOrg[nBulb].z -= 32;
+							else if( !strnicmp(tmp,"LampFixture01a",14) )
+							{
+								// no org fix
 
-					fluorpropang[iFluor].x *= -1;
-					fluorpropang[iFluor].x += -90;//assume axial
+								BulbAngles[nBulb].x +=15;
+							}
+							else if( !strcmp( tmp, "combine_intmonitor001.mdl" ) )
+							{
+								BulbOrg[nBulb].z += 24;
 
+								BulbAngles[nBulb].y += 180;
+								BulbAngles[nBulb].x -= 90;
+							}
+							else if( !strnicmp( tmp, "light_spotlight02_lamp", 22 ) )
+							{
+								BulbAngles[nBulb].x -= 90;
+								BulbAngles[nBulb].y += 180;
+							}
+							else if( !strnicmp( tmp, "light_decklight01_on", 20 )
+								|| !strnicmp( tmp, "light_spotlight01_lamp", 22 )
+								|| !strcmp( tmp,"LightTowerCluster01.mdl" ) )
+							{
+								BulbAngles[nBulb].x += 90;
+								BulbAngles[nBulb].x *= -1;
+							}
 
-					//tweaks
-					if( !strcmp( tmp,"Lights_Florescent01a.mdl" ) )
-						fluorpropang[iFluor].z = 48; //array
-
-					else if( !strnicmp( tmp,"lab_flourescentlight001a",24 )
-						|| !strnicmp( tmp,"prison_flourescentlight001a",27 ) )
-					{
-						fluorproporg[iFluor].z += -33;
-						fluorpropang[iFluor].z = 48; //array
-					}
-					else if( !strnicmp( tmp,"prison_flourescentlight001b",27 )//before we meet alyx
-						|| !strnicmp( tmp,"lab_flourescentlight001b",24 ) )
-					{
-						fluorproporg[iFluor].z += -73+3;
-						fluorpropang[iFluor].z = 48; //array
-					}
-					else
-						fluorpropang[iFluor].z = 0;
-
-					printf( "\tfluor %i: %s pos %.f %.f %.f ang %.f %.f model %i\n",
-						iFluor, tmp, 
-						fluorproporg[iFluor].x, fluorproporg[iFluor].y, fluorproporg[iFluor].z, 
-						fluorpropang[iFluor].x, fluorpropang[iFluor].y, propmodelidx[i] );
-					break;
-				}
-			}
-			
-			if( iPropType ) continue;
-
-			//find nozzles
-			for( tmp=name; *tmp && *tmp!='.'; tmp++ )
-			{
-				if( !strnicmp( tmp,"light_spotlight01_base", 22 )
-				|| !strnicmp( tmp,"light_spotlight02_base", 22 )
-				|| !strnicmp( tmp, "lamppost03a_off", 15 ) )
-				break;
-
-				if(	!strnicmp(tmp,"combine_light",13)  )
-				{
-					iPropType = PROPTYPE_NOZZLE;
-					iNozzle++;
-					VectorCopy( m_StaticProps[i].m_Origin, nozzleproporg[iNozzle] );
-					MapQAngleAsVector( m_StaticProps[i].m_Angles, nozzlepropang[iNozzle] );
-					nozzlepropang[iNozzle].y += 180; // modeled backwards
-				}
+				printf( "\tbulb %i: %s prop %i pos %.f %.f ang %.f %.f\n",
+					nBulb, dict.m_pStudioHdr->name, propModelIdx,
+					BulbOrg[nBulb][0], BulbOrg[nBulb][1],  
+					BulbAngles[nBulb][0], BulbAngles[nBulb][1]  );
 				
-				if(	!strnicmp( tmp,"prison_lamp001a", 15 )
-				|| !strnicmp( tmp,"prison_lamp001b", 15 )
-				 || !strnicmp( tmp,"prison_lamp001c", 15 )
-				 || !strnicmp(tmp,"LampFixture01a", 14)
-	//			|| !strnicmp( tmp, "combine_light", 13 )
-				|| !strnicmp( tmp, "light_spotlight01_lamp", 22 ) 
-				|| !strnicmp( tmp, "light_spotlight02_lamp", 22 )
-				|| !strnicmp( tmp, "lamp_bell_on", 12 )
-				|| !strnicmp( tmp, "light_decklight01_on", 20 )
-				|| !strcmp( tmp, "combine_intmonitor001.mdl" )
-				|| !strcmp( tmp, "LightTowerCluster01.mdl" )
-				|| !strcmp( tmp, "walllight001a.mdl" ) )
-				{
-					iPropType = PROPTYPE_NOZZLE;
-					iNozzle++;
-
-					VectorCopy( m_StaticProps[i].m_Origin, nozzleproporg[iNozzle] );
-					MapQAngleAsVector( m_StaticProps[i].m_Angles, nozzlepropang[iNozzle] );
-					nozzlepropang[iNozzle].x -= 90; //same for all nozzles
-
-					// tweaks
-					if( !strnicmp( tmp,"prison_lamp001a",15 ) )//hanging small canals11
-						nozzleproporg[iNozzle].z -= 10;
-					else if( !strnicmp( tmp,"prison_lamp001b",15 ) )//hanging large trst02
-						nozzleproporg[iNozzle].z -= 32;
-					else if( !strnicmp(tmp,"LampFixture01a",14) )
-						nozzlepropang[iNozzle].x +=15;
-/*					else if(  !strnicmp(tmp,"combine_light",13))//  &&  Axial(nozzlepropang[iNozzle].x)  )
-						//  else if( !strcmp( tmp, "combine_light002a.mdl" )  )
-					{
-						nozzlepropang[iNozzle].x += 90;
-						nozzlepropang[iNozzle].y += 180; // modeled backwards
-					}
-					*/
-					else if( !strcmp( tmp, "combine_intmonitor001.mdl" ) )
-					{
-						nozzleproporg[iNozzle].z += 24;
-
-						nozzlepropang[iNozzle].y += 180;
-						nozzlepropang[iNozzle].x -= 90;
-					}
-					else if( !strnicmp( tmp, "light_spotlight02_lamp", 22 ) )
-					{
-						nozzlepropang[iNozzle].x -= 90;
-						nozzlepropang[iNozzle].y += 180;
-					}
-					else if( !strnicmp( tmp, "light_decklight01_on", 20 )
-						|| !strnicmp( tmp, "light_spotlight01_lamp", 22 )
-						|| !strcmp( tmp,"LightTowerCluster01.mdl" ) )
-					{
-						nozzlepropang[iNozzle].x += 90;
-						nozzlepropang[iNozzle].x *= -1;
-					}
-					else if( !strcmp(tmp,"walllight001a.mdl") )//eli's
-					{	
-						Vector fwd, tmporg;
-						tmporg=nozzleproporg[iNozzle];
-						nozzlepropang[iNozzle].x += 90;
-						AngleVectors( QAngle( nozzlepropang[iNozzle].x,nozzlepropang[iNozzle].y,0 ), &fwd );						
-						VectorMA( tmporg, -7.5, fwd, nozzleproporg[iNozzle] );
-						//nozzleproporg[iNozzle].z += 5;
-						nozzlepropang[iNozzle].x = 90;
-
-						//and now for the 2nd light (hack)
-						iNozzle++;
-						VectorCopy( m_StaticProps[i].m_Origin, nozzleproporg[iNozzle] );					
-						MapQAngleAsVector( m_StaticProps[i].m_Angles,nozzlepropang[iNozzle] );
-						VectorMA( tmporg, -7.5, fwd, nozzleproporg[iNozzle] );
-						//nozzleproporg[iNozzle].z += -5;
-						nozzlepropang[iNozzle].x = -90;
-					}
-
-					printf( "\tnozzle %i: model %s prop %i pos %.f %.f ang %.f %.f\n",
-						iNozzle, tmp, propmodelidx[i],
-						nozzleproporg[iNozzle].x, nozzleproporg[iNozzle].y,
-						nozzlepropang[iNozzle].x, nozzlepropang[iNozzle].y );
-					break;
-				}
+				iPropType = PROPTYPE_BULB;
+				nBulb++;
+				break;
 			}
-
-			if( iPropType ) continue;
-
-			//find bulbs
-			for( tmp=name; *tmp && *tmp!='.'; tmp++ )
-			{
-				if( !strnicmp( tmp, "lightbulb", 9 )
-					|| !strnicmp( tmp, "light_cagelight02_on", 20 )
-					|| !strnicmp( tmp, "light_cagelight01_on", 20 )
-					|| !strcmp( tmp, "light_cagelight01_off.mdl" )
-					|| !strnicmp( tmp, "prison_cagedlight", 17 )
-					|| !strnicmp( tmp, "prison_cellwindow002a", 21 )
-					|| !strnicmp( tmp, "lab_flourescentlight002b", 24 ) // kleiner's lab_flourescentlight002b
-					|| !strnicmp( tmp, "light_domelight02_on", 20 )
-					|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
-				{
-					iPropType = PROPTYPE_BULB;
-					iBulb++;
-					VectorCopy( m_StaticProps[i].m_Origin, bulbproporg[iBulb] );
-					MapQAngleAsVector( m_StaticProps[i].m_Angles, bulbpropang[iBulb] );
-
-					// tweaks
-					if( !strnicmp( tmp,"Lightbulb01a",12 ) )
-						bulbproporg[iBulb].z += 49;
-					else if( !strnicmp( tmp,"Lightbulb03a",12 ) )
-						bulbproporg[iBulb].z -= 39;
-
-					if( !strnicmp( tmp,"lab_flourescentlight002b", 24 )
-						|| !strnicmp( tmp, "prison_flourescentlight002b", 27 ) )
-					{
-						Vector fwd;
-						AngleVectors( m_StaticProps[i].m_Angles, &fwd );
-						VectorMA( bulbproporg[iBulb], 2, fwd, bulbproporg[iBulb] );
-						bulbpropang[iBulb].z = 32-16; // blur: omni lightpanel
-					}
-					else if( !strnicmp(tmp,"prison_cellwindow002a",21 ) )//hack
-					{
-						bulbproporg[iFluor].z += 16;//so we have cool shadows from grate
-						bulbpropang[iFluor].z = 123;//hack to keep light portraying sun
-					}
-
-					else
-					{
-						bulbpropang[iBulb].Invalidate();
-					}
-
-					printf( "\tbulb %i: model %s prop %i pos %.f %.f\n",
-						iBulb, tmp, propmodelidx[i],
-						bulbproporg[iBulb][0], bulbproporg[iBulb][1] );
-					
-					break;
-				}
-			}
-
-			//find backsplash omnis
-			/*for( tmp=name; *tmp && *tmp!='.'; tmp++ )
-			{
-				if(
-					!strnicmp( tmp, "light_domelight02_on", 20 )
-					)
-				{
-					iPropType = PROPTYPE_BULB;
-					iBulb++;
-					VectorCopy( m_StaticProps[i].m_Origin, bulbproporg[iBulb] );
-					MapQAngleAsVector( m_StaticProps[i].m_Angles, bulbpropang[iBulb] );
-
-					// tweaks
-					else
-					{
-						bulbpropang[iBulb].Invalidate();
-					}
-
-					printf( "  bulb %i: model %s prop %i pos %.f %.f\n",
-						iBulb, tmp, propmodelidx[i],
-						bulbproporg[iBulb][0], bulbproporg[iBulb][1] );
-					
-					break;
-				}
-			}*/
-					
-
 		}
-		printf( "\nprop libs: %i bulbs, %i fluors, %i nozzles\n\n", iBulb+1, iFluor+1, iNozzle+1 );
-	}
+// no check for filled proptype:  some props shall be put in both bulb and spot
 
+	
+		
+		//find nozzles
+		for( char *tmp=dict.m_pStudioHdr->name; *tmp && *tmp!='.'; tmp++ )
+		{
+			if( !strnicmp( tmp,"light_spotlight01_base", 22 )
+			|| !strnicmp( tmp,"light_spotlight02_base", 22 )
+			|| !strnicmp( tmp, "lamppost03a_off", 15 ) )
+			break;
+			
+			if(	!strnicmp( tmp,"prison_lamp001a", 15 )
+			|| !strnicmp( tmp,"prison_lamp001b", 15 )
+			 || !strnicmp( tmp,"prison_lamp001c", 15 )
+			 || !strnicmp(tmp,"LampFixture01a", 14)
+			|| !strnicmp( tmp, "combine_light", 13 )
+			|| !strnicmp( tmp, "light_spotlight01_lamp", 22 ) 
+			|| !strnicmp( tmp, "light_spotlight02_lamp", 22 )
+			|| !strnicmp( tmp, "lamp_bell_on", 12 )
+			|| !strnicmp( tmp, "light_decklight01_on", 20 )
+			|| !strcmp( tmp, "combine_intmonitor001.mdl" )
+			|| !strcmp( tmp, "LightTowerCluster01.mdl" )
+			|| !strcmp( tmp, "walllight001a.mdl" )
+			|| !strnicmp( tmp, "light_cagelight", 15 )
+			|| !strnicmp( tmp, "prison_cagedlight", 17 )
+			//  bulbs too
+/*			|| !strnicmp( tmp, "lightbulb", 9 )
+			|| !strnicmp( tmp, "light_cagelight", 15 )
+			|| !strnicmp( tmp, "prison_cagedlight", 17 )
+			|| !strnicmp( tmp, "light_domelight", 15 )	*/
+			)
+			{
+				VectorCopy( propOrg, NozzleOrg[nNozzle] );
+				VectorCopy( propAngles, NozzleAngles[nNozzle] );
+				NozzleAngles[nNozzle].x -= 90; //same for all nozzles
+
+				// tweaks
+				if( !strnicmp( tmp,"prison_lamp001a",15 ) )//hanging small canals11
+					NozzleOrg[nNozzle].z -= 10;
+				else if( !strnicmp( tmp,"prison_lamp001b",15 ) )//hanging large trainstation02
+					NozzleOrg[nNozzle].z -= 32;
+				else if( !strnicmp(tmp,"LampFixture01a",14) )
+				{
+					//no org fix
+
+					NozzleAngles[nNozzle].x +=15;
+				}
+				else if( !strnicmp( tmp, "combine_light", 13 ) )
+				{
+					NozzleAngles[nNozzle].x += 90; //same for all nozzles
+					NozzleAngles[nNozzle].y += 180; // modeled backwards
+				}
+				else if( !strcmp( tmp, "combine_intmonitor001.mdl" ) )
+				{
+					NozzleOrg[nNozzle].z += 24;
+
+					NozzleAngles[nNozzle].y += 180;
+					NozzleAngles[nNozzle].x -= 90;
+				}
+				else if( !strnicmp( tmp, "light_spotlight02_lamp", 22 ) )
+				{
+					NozzleAngles[nNozzle].x -= 90;
+					NozzleAngles[nNozzle].y += 180;
+				}
+				else if( !strnicmp( tmp, "light_decklight01_on", 20 )
+					|| !strnicmp( tmp, "light_spotlight01_lamp", 22 )
+					|| !strcmp( tmp,"LightTowerCluster01.mdl" ) )
+				{
+					NozzleAngles[nNozzle].x += 90;
+					NozzleAngles[nNozzle].x *= -1;
+				}
+			
+				//  bulbs too
+				else if( !strnicmp( tmp,"Lightbulb01a",12 ) )
+					NozzleOrg[nNozzle].z += 10;
+				else if( !strnicmp( tmp,"Lightbulb03a",12 ) )
+					NozzleOrg[nNozzle].z += -52;
+
+				printf( "\tnozzle %i: model %s prop %i pos %.f %.f ang %.f %.f\n",
+					nNozzle, tmp, propModelIdx,
+					NozzleOrg[nNozzle].x, NozzleOrg[nNozzle].y,
+					NozzleAngles[nNozzle].x, NozzleAngles[nNozzle].y );
+
+
+				iPropType = PROPTYPE_NOZZLE;
+				nNozzle++;
+				break;
+			}
+		}
+		if( iPropType ) continue;
+
+		//  directional fluors
+		if(  FindFluorsByName(		dict.m_pStudioHdr->name, propOrg,propAngles,propModelIdx)  )
+			continue;		
+
+		//  sewer grate in canals, dusty sparkles
+		if(  FindNotadevicesByName(dict.m_pStudioHdr->name,propOrg,propAngles,propModelIdx)  )
+			continue;		
+	}
+	Warning( "\nTotal in prop libraries: %i bulbs, %i fluors, %i omnifluors, %i nozzles, %i not devices\n\n", nBulb, nFluor, nOmnifluor, nNozzle, nNotadevice );
+
+	
 
 	// Triangle coverage of 1 (full coverage)
 	Vector fullCoverage;
 	fullCoverage.x = 1.0f;
-
 	for ( int nProp = 0; nProp < count; ++nProp )
 	{
+		bool bAllowToCastShadow=true;
 		CStaticProp &prop = m_StaticProps[nProp];
 		StaticPropDict_t &dict = m_StaticPropDict[prop.m_ModelIdx];
 
-		if ( prop.m_Flags & STATIC_PROP_NO_SHADOW )
+		for( char *tmp=dict.m_pStudioHdr->name; *tmp && *tmp!='.'; tmp++ )
+		{
+			if( !g_bLightingFixes )
+				break;
+
+			if(	!strnicmp( tmp, "terior_fence", 12 )
+//			|| 	!strnicmp( tmp, "_card_", 6 )
+//			|| 	!strnicmp( tmp, "_cards_", 7 )
+			)
+			{
+				bAllowToCastShadow=false;
+//				printf("not casting shadows from %s\n", dict.m_pStudioHdr->name );
+				break;
+			}
+		}
+
+		if( g_bLightingFixes && !bAllowToCastShadow )
 			continue;
+		else
+			if ( prop.m_Flags&STATIC_PROP_NO_SHADOW )
+				continue;
+		
 
 		// If not using static prop polys, use AABB
 		if ( !g_bStaticPropPolys )
@@ -1900,7 +2012,7 @@ void CVradStaticPropMgr::AddPolysForRayTrace( void )
 						if ( Q_stristr( pTxtr->pszName(),
 										g_NonShadowCastingMaterialStrings[check] ) )
 						{
-							//printf("skip mat name=%s\n",pTxtr->pszName());
+						//	printf("skip mat name=%s\n",pTxtr->pszName());
 							bSkipThisMesh = true;
 							break;
 						}

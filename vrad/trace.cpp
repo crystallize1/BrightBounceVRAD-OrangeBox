@@ -490,9 +490,11 @@ dmodel_t *BrushmodelForEntity( entity_t *pEntity )
 
 void AddBrushToRaytraceEnvironment( dbrush_t *pBrush, const VMatrix &xform )
 {
-	if ( !( pBrush->contents & MASK_OPAQUE ) )
+	if (  !(pBrush->contents&MASK_OPAQUE)  )
 		return;
-
+	//  UNDONE: updated the definition of MASK_OPAQUE
+	// dirty approach but it better all be in one place
+	
 	Vector v0, v1, v2;
 	for (int i = 0; i < pBrush->numsides; i++ )
 	{
@@ -501,7 +503,7 @@ void AddBrushToRaytraceEnvironment( dbrush_t *pBrush, const VMatrix &xform )
 		texinfo_t *tx = &texinfo[side->texinfo];
 		winding_t *w = BaseWindingForPlane (plane->normal, plane->dist);
 
-		if ( tx->flags & SURF_SKY || side->dispinfo )
+		if ( tx->flags&SURF_SKY || side->dispinfo )
 			continue;
 
 		for (int j=0 ; j<pBrush->numsides && w; j++)
@@ -564,6 +566,7 @@ void AddBrushes( dmodel_t *pModel, const VMatrix &xform )
 	{
 		CUtlVector<int> brushList;
 		GetBrushes_r( pModel->headnode, brushList );
+
 		for ( int i = 0; i < brushList.Count(); i++ )
 		{
 			int ndxBrush = brushList[i];
@@ -612,8 +615,8 @@ void AddBrushesForRayTrace( void )
 	{
 		int ndxFace = dmodels[0].firstface + i;
 		dface_t *face = &g_pFaces[ndxFace];
-
 		texinfo_t *tx = &texinfo[face->texinfo];
+
 		if ( !( tx->flags & SURF_SKY ) )
 			continue;
 

@@ -24,6 +24,12 @@
 
 static FileHandle_t pFpTrans = NULL;
 
+
+#define UNSIGNED_SHORT_MAX	1e8//65536.f  //  6553`5` unsigned short max
+
+#define	TRANSFER_UPSCALE	1 // (UNSIGNED_SHORT_MAX/4)  //  16384, inverse transfer scale
+#define	TRANSFER_DOWNSCALE  1// /TRANSFER_UPSCALE //  0.000061
+
 /*
 
 NOTES
@@ -93,13 +99,13 @@ bool g_bLargeDispSampleRadius = false;
 bool g_bOnlyStaticProps = false;
 bool g_bShowStaticPropNormals = false;
 
-float		g_fBounceScale = 1.0f;
-float		g_fTransCapRatio = 1.0f;
-float		g_fLightIntensityScale = 1.0f;
+float		flIndirectScale = 1.0f;
+float		InwardCornerLightbleedCap = 0.4f;  //  zhlt=0.4,p2st=0.8
 float		g_fGammaScale = 1.0f;
-float		gamma = 0.5;
-float		indirect_sun = 1.0;
-float		reflectivityScale = 1.0;
+float		gamma = 0.5f;
+float		indirect_sun = 1.0f;
+float		reflectivityScale = 1.0f;
+float		g_fTonemappingGamma = 1.0f;
 qboolean	do_extra = true;
 bool		debug_extra = false;
 qboolean	do_fast = false;
@@ -110,7 +116,7 @@ float		smoothing_threshold = 0.7071067; // cos(45.0*(M_PI/180))
 float		coring = 1.0;	// Light threshold to force to blackness(minimizes lightmaps)
 qboolean	texscale = true;
 int			dlight_map = 0; // Setting to 1 forces direct lighting into different lightmap than radiosity
-float		MaxLuxelIntensity = 0;
+float		TargetLuxelIntensity = 0;
 
 float		luxeldensity = 1.0;
 unsigned	num_degenerate_faces;
@@ -126,20 +132,23 @@ bool        g_bDisablePropSelfShadowing = false;
 
 bool		g_bSkipPointlights = false;
 bool		g_bSkipSpotlights = false;
-bool		g_bSkipSun = false;
+bool		g_bSkipSunlight_Skylight = false;
 
-bool		g_bSkipFakeLights = false;
+bool		g_bLightingFixes = false;
+
 bool		g_bForceTexlights = false;
 bool		g_bDemandInnerCone = false;
 bool		g_bForceAttn = false;
+
 bool		g_bHL1Bounce = false;
-bool		g_bSuperUniform = false;
-bool		g_bSimpleChildren = false;
-bool		g_bSkipChildren = false;  //  skip any interaction with child patches
-bool		g_bAllPatchesEqual = false;
+bool		g_bPullFromChildren = true;  //  whether pull light energy from child patches or not
+
+bool		g_bLightbleeds = false;
+bool		g_bUniform = false;
+
 bool		g_bMonteCarloSpread = false;
 bool		g_bAdaptiveScales = false;
-bool		g_bCloudLight = false;
+bool		g_bCloudlight = false;
 bool		g_bDebugClouds = false;
 
 static		Vector DesatCoefs (0.299, 0.587, 0.114);
@@ -263,6 +272,7 @@ void ReadLightFile (char *filename)
 		else if ( sscanf( scan, "forcetextureshadow %s", NoShadName ) == 1 )
 		{
 			// printf("add %s as a non shadow casting material\n",NoShadName);
+			//  printf("force texture shadows for %s material\n",NoShadName);
 			ForceTextureShadowsOnModel( NoShadName );
 		}
 		else
@@ -282,21 +292,6 @@ void ReadLightFile (char *filename)
 			}
 
 			LightForString( scan + strlen( szTexlight ) + 1, value );
-
-			/*if( g_bSkipFakeLights )
-			{
-				if ( sscanf( scan, "lights/white00%s", NoShadName ) == 1 )
-				{
-					Warning( "lights/white00%s %.f %.f %.f to ", NoShadName, value.x,value.y,value.z );
-					VectorCopy( extsunlight, value );
-					Warning( "%f %f %f\n", NoShadName, value.x,value.y,value.z );
-				}
-				else if ( sscanf( scan, "glass/glass%s", NoShadName ) == 1 )
-				{
-					Warning( "found fake sunlight glass/glass%s %.f %.f %.f\n", NoShadName, value.x,value.y,value.z );
-					value=extsunlight;
-				}
-			}*/
 
 			int j = 0;
 			for( j; j < num_texlights; j ++ )
@@ -471,9 +466,6 @@ void BaseLightForFace( dface_t *f, Vector& light, float *parea, Vector& reflecti
 	*parea = texdata->height * texdata->width;
 
 	VectorScale( texdata->reflectivity, reflectivityScale, reflectivity );
-
-	if(  g_bMonteCarloSpread  )
-		VectorScale(reflectivity, 0.5f/M_PI, reflectivity);
 
 	
 	// always keep this less than 1 or the solution will not converge
@@ -762,6 +754,7 @@ void MakePatches (void)
 	ParseEntities ();
 	qprintf ("%i faces\n", numfaces);
 
+	//  func_details are not entities, oops
 	for (i=0 ; i<nummodels ; i++)
 	{
 		mod = dmodels+i;
@@ -774,7 +767,7 @@ void MakePatches (void)
 
 		for (j=0 ; j<mod->numfaces ; j++)
 		{
-			fn = mod->firstface + j;
+			fn = mod->firstface + j;  // "fn" "face number" it seems
 			face_entity[fn] = ent;
 			VectorCopy (origin, face_offset[fn]);
 			f = &g_pFaces[fn];
@@ -1109,6 +1102,8 @@ void SubdividePatches (void)
 
 //=====================================================================
 
+
+
 /*
 =============
 MakeScales
@@ -1128,9 +1123,6 @@ int max_transfer;
 //-----------------------------------------------------------------------------
 float FormFactorPolyToDiff ( CPatch *pPolygon, CPatch* pDifferential )
 {
-	//  looks very uniform, I'm keeping this
-	//surpassed by monte-carlo constant of 0.5/m_pi
-
 	winding_t *pWinding = pPolygon->winding;
 
 	float flFormFactor = 0.0f;
@@ -1155,9 +1147,6 @@ float FormFactorPolyToDiff ( CPatch *pPolygon, CPatch* pDifferential )
 
 	flFormFactor *= ( 0.5f / pPolygon->area ); // divide by pi later, multiply by area later
 
-	if( g_bSuperUniform )
-		flFormFactor *= pDifferential->area/M_PI;  //  0.5f / M_PI;
-
 	return flFormFactor;
 }
 
@@ -1178,14 +1167,13 @@ float FormFactorDiffToDiff ( CPatch *pDiff1, CPatch* pDiff2 )
 }
 
 
-
 void MakeTransfer( int ndxPatch1, int ndxPatch2, transfer_t *all_transfers )
 //void MakeTransfer (CPatch *patch, CPatch *patch2, transfer_t *all_transfers )
 {
-	extern unsigned int abortedtransfers;
 	Vector	delta;
 	vec_t	scale;
 	float	trans;
+	float	send=0;
 	transfer_t *transfer;
 
 	//
@@ -1196,8 +1184,6 @@ void MakeTransfer( int ndxPatch1, int ndxPatch2, transfer_t *all_transfers )
 
 	CPatch *pPatch1 = &g_Patches.Element( ndxPatch1 );
 	CPatch *pPatch2 = &g_Patches.Element( ndxPatch2 );
-
-	//printf("pPatch1area %f pPatch2area %f\n", pPatch1->area, pPatch2->area );
 
 	if (IsSky( &g_pFaces[ pPatch2->faceNumber ] ) )
 		return;
@@ -1218,50 +1204,53 @@ void MakeTransfer( int ndxPatch1, int ndxPatch2, transfer_t *all_transfers )
 
 	if( g_bHL1Bounce )
 	{
-		scale = FormFactorDiffToDiff( pPatch2, pPatch1 );
+		trans = FormFactorDiffToDiff( pPatch2, pPatch1 );
 		// patch normals may be > 90 due to smoothing groups
-		if (scale <= 0)
-		{
-			abortedtransfers++;
+		if (trans <= 0)
 			return;
-		}
-
-		Vector vDelta;
-		VectorSubtract( pPatch1->origin, pPatch2->origin, vDelta );
-		if( g_bSuperUniform )
-		{			
+		
+		if( g_bUniform )
+		{
+			Vector vDelta;
+			VectorSubtract( pPatch1->origin, pPatch2->origin, vDelta );
 			float flThreshold = ( M_PI * 0.04 ) * DotProduct( vDelta, vDelta );
-
-			if (flThreshold < pPatch2->area)
+			if( flThreshold < pPatch2->area )
 			{
-				scale = FormFactorPolyToDiff( pPatch2, pPatch1 );
-				if (scale <= 0.0)
-				{
-					abortedtransfers++;
-					return;
-				}
-			}
+				trans = max(trans, FormFactorPolyToDiff( pPatch2, pPatch1 )  ); //using "max" here makes bright steps on the monument
+				if (trans <= 0.0)return;
+				// lesser scale = brighter?
+				trans *= pPatch2->area;
+			}		
+			trans=min(  InwardCornerLightbleedCap, trans*pPatch2->area );
 		}
-			
-		trans = scale;
+		else
+		{
+			// send=0 if Uniform! be careful!
+			send = trans * pPatch2->area;
+			// Caps light from getting weird (lightbleeds in inward corners - fiv)
+			if(  send > InwardCornerLightbleedCap  )
+			{
+				send = InwardCornerLightbleedCap;
+				trans = InwardCornerLightbleedCap / pPatch2->area;
+			}
 
-			
-		
-		float InnerAngleExplosion = 0.8;  //  0.8
-		float tmp = trans * (pPatch2->area);
-		if( tmp > InnerAngleExplosion  )
-			trans = InnerAngleExplosion * (1.0f/pPatch2->area);
+			// scale to 16 bit (black magic)
+			trans *= pPatch2->area;
+		}
 
-        // scale to 16 bit
-		trans *= TRANSFER_SCALE * (pPatch2->area);
-		float transferlimit = g_fTransCapRatio * 65536;
-//		still works fine without limiting it?
-		if (trans > transferlimit)
-			trans = transferlimit;
 		
+		{
+			// scale to 16 bit (black magic)
+			trans *= TRANSFER_UPSCALE;
+			if( trans >= UNSIGNED_SHORT_MAX )
+				trans = UNSIGNED_SHORT_MAX;
+			if( trans <= 0.0 ) return;
+		}
 	}
 	else
 	{
+		//  normal route!
+
 		scale = FormFactorDiffToDiff( pPatch2, pPatch1 );
 		
 		// patch normals may be > 90 due to smoothing groups
@@ -1284,7 +1273,7 @@ void MakeTransfer( int ndxPatch1, int ndxPatch2, transfer_t *all_transfers )
 					return;
 			}
 			
-			trans = ( pPatch1->area * scale );
+	trans = (pPatch2->area*scale);
 		
 			if (trans <= TRANSFER_EPSILON)
 			{
@@ -1295,7 +1284,11 @@ void MakeTransfer( int ndxPatch1, int ndxPatch2, transfer_t *all_transfers )
 
 	transfer->patch = pPatch2 - g_Patches.Base();
 	
+	// FIXME: why is this not trans?
 	transfer->transfer = trans;
+	if( g_bHL1Bounce && !g_bUniform )
+		transfer->transfer = send;
+	//  for renormalization(??) of transfers
 
 
 #if 0
@@ -1346,12 +1339,13 @@ void MakeScales ( int ndxPatch, transfer_t *all_transfers )
 		// get total transfer energy
 		t2 = all_transfers;
 
+		// overflow check!
 		for (j=0 ; j<patch->numtransfers ; j++, t2++)
 		{
-			total += t2->transfer;
+		total += t2->transfer;
+		//"send=trans*patch2" in zhlt?
 		}
-
-
+		
 		
 		// the total transfer should be PI, but we need to correct errors due to overlaping surfaces
 		if (total > M_PI)
@@ -1361,9 +1355,8 @@ void MakeScales ( int ndxPatch, transfer_t *all_transfers )
 		
 
 		if( g_bHL1Bounce )
-		{	
-			total=0.5f/M_PI;  //  	as in p2st:  total = 0.5 / M_PI;
-		}
+			total =   0.5f / M_PI;
+		// 	as in p2st
 		
 
 		t = patch->transfers;
@@ -1511,7 +1504,6 @@ void WriteTrace( const char *pFileName, const FourRays &rays, const RayTracingRe
 	FileHandle_t out;
 
 	out = g_pFileSystem->Open( pFileName, "a" );
-	//printf( "opening ''%s'' file to write debug info\n", pFileName );
 	if (!out)
 		Error ("Couldn't open %s", pFileName);
 
@@ -1541,50 +1533,34 @@ CollectLight
 // patch's addlight = 0
 // pull received light from children.
 
-void CollectLight( Vector& total, float num )
+float MeasuredLast=0;
+void CollectLight( Vector& total, unsigned numbounce )
 {
 	int i, j;
 	CPatch	*patch;
 
+	float escapecoef=0,MeasuredIntensity=0;
 	VectorFill( total, 0 );
-	float assert=0;
-	static float assertlast;
 	extern Vector vecZero;
 
 	// process patches in reverse order so that children are processed before their parents
 	unsigned int uiPatchCount = g_Patches.Size();
 
-	Msg("Pass 1: measure\n");
 	for( i = uiPatchCount - 1; i >= 0; i-- )
 	{
 		patch = &g_Patches.Element( i );
 		int normalCount = patch->needsBumpmap ? NUM_BUMP_VECTS+1 : 1;
 		if (patch->sky)
 			VectorFill( emitlight[ i ], 0 );
-		else if (  ( patch->child1 == g_Patches.InvalidIndex() )  ||  g_bAllPatchesEqual )
+		else if (  ( patch->child1 == g_Patches.InvalidIndex() ) )
 		{
 			for ( j = 0; j < normalCount; j++ )
 				VectorAdd( patch->totallight.light[j], addlight[i].light[j], patch->totallight.light[j] );
 
-			if( g_bHL1Bounce )	assert +=RGBintensity(addlight[i].light[0]);  //  /TRANSFER_SCALE;
-			else	assert+=RGBintensity(addlight[i].light[0]);
+			if( g_bHL1Bounce )
+				MeasuredIntensity += RGBintensity(  addlight[i].light[0]  );
 		}
-		else if(  g_bSimpleChildren  )
-		{
-			CPatch *child1;
-			CPatch *child2;
-
-			child1 = &g_Patches[patch->child1];
-			child2 = &g_Patches[patch->child2];
-
-			for( j=0;j<normalCount; j++ )
-			{
-				VectorScale( child1->totallight.light[j], 1, patch->totallight.light[j] );
-				VectorMA( patch->totallight.light[j], 1, child2->totallight.light[j], patch->totallight.light[j] );
-			}
-			VectorAdd(emitlight[patch->child1], emitlight[patch->child2], emitlight[i]);
-		}
-		else if( !g_bSkipChildren )
+		else if( g_bPullFromChildren )
 		{
 			float s1, s2;
 			CPatch *child1;
@@ -1607,41 +1583,41 @@ void CollectLight( Vector& total, float num )
 			VectorScale( emitlight[patch->child1], s1, emitlight[i] );
 			VectorMA( emitlight[i], s2, emitlight[patch->child2], emitlight[i] );
 		}
-
-		
 	}
 
-	Msg("last %.f this %.f ratio %.3f\n", assertlast,assert, assert/assertlast );
-	if(  assert && assertlast && assert/assertlast>0.9f )//&&  !numbounce  && (g_bSuperUniform||g_bSkipChildren)  )
+	if( MeasuredLast )
 	{
-		Warning("coef %.3f; prevent overflow; finishing...\n", assert/assertlast );
-		total=vecZero;
-		return;
+		escapecoef = MeasuredIntensity/MeasuredLast;
+		Msg("last %.f this %.f ratio %.3f\n", MeasuredLast, MeasuredIntensity, escapecoef );
+		Msg("Pass 2: process\n" );
 	}
-	assertlast=assert;
+		
 
+	MeasuredLast = MeasuredIntensity;
 
-	Msg("Pass 2: work\n" );
-	for( i = uiPatchCount - 1; i >= 0; i-- )
+	
+	for( i = uiPatchCount - 1; i>=0 && escapecoef<0.9f; i-- )
 	{
 		patch = &g_Patches.Element( i );
 		int normalCount = patch->needsBumpmap ? NUM_BUMP_VECTS+1 : 1;
 		// sky's never collect light, it is just dropped
-		if (patch->sky)
+		if (patch->sky )
 		{
 			VectorFill( emitlight[ i ], 0 );
 		}
-
-		else if (  ( patch->child1 == g_Patches.InvalidIndex() )  ||  g_bAllPatchesEqual )
+		else if ( patch->child1 == g_Patches.InvalidIndex() )
 		{
 			// This is a leaf node.
 			for ( j = 0; j < normalCount; j++ )
+			{
 				VectorAdd( patch->totallight.light[j], addlight[i].light[j], patch->totallight.light[j] );
+
+			}
 
 			// TODO intermediate vector to store pre-emitlight for measuring
 			if( g_bHL1Bounce )
 			{
-				VectorScale( addlight[i].light[0], 1.0f/TRANSFER_SCALE, emitlight[i] );
+				VectorScale( addlight[i].light[0], TRANSFER_DOWNSCALE, emitlight[i] );
 				VectorAdd( total, addlight[i].light[0], total );
 			}
 			else
@@ -1649,30 +1625,9 @@ void CollectLight( Vector& total, float num )
 				VectorCopy( addlight[i].light[0], emitlight[i] );
 				VectorAdd( total, emitlight[i], total );
 			}
+			// yes, in HL1 path we scalecopy emitlight but add addlight, just like it is done in hlrad
 		}
-
-		else if(  g_bSimpleChildren  )
-		{
-			// dontpulllight = also pull light but differently
-
-			// This is an interior node.
-			// Pull received light from children.
-			CPatch *child1;
-			CPatch *child2;
-
-			child1 = &g_Patches[patch->child1];
-			child2 = &g_Patches[patch->child2];
-
-			for( j=0;j<normalCount; j++ )
-			{
-				VectorScale( child1->totallight.light[j], 1, patch->totallight.light[j] );
-				VectorMA( patch->totallight.light[j], 1, child2->totallight.light[j], patch->totallight.light[j] );
-			}
-
-			VectorAdd(emitlight[patch->child1], emitlight[patch->child2], emitlight[i]);
-		}
-
-		else if( !g_bSkipChildren )
+		else if( g_bPullFromChildren )
 		{
 			// This is an interior node.
 			// Pull received light from children.
@@ -1711,6 +1666,12 @@ void CollectLight( Vector& total, float num )
 		}
 	}
 
+	if( escapecoef > 0.9f )
+	{
+		Warning("Bounce #%i was aborted to prevent overflow: energy stabilized at %.3f\n", numbounce, escapecoef );
+		total=vecZero;
+		return;
+	}
 
 }
 
@@ -1840,7 +1801,7 @@ void GatherLight (int threadnum, void *pUserData)
 				// find light emitted from other patch
 				for(i=0; i<3; i++)
 				{
-					v[i] = emitlight[trans->patch][i] * patch2->reflectivity[i] * g_fBounceScale;//bounced light mul by refl=full bounce
+					v[i] = emitlight[trans->patch][i] * patch2->reflectivity[i];
 				}
 				
 				// remove normal already factored into transfer steradian
@@ -1872,11 +1833,13 @@ void GatherLight (int threadnum, void *pUserData)
 			{
 				for(i=0; i<3; i++)
 				{
-					v[i] = emitlight[trans->patch][i] * g_Patches[trans->patch].reflectivity[i] * g_fBounceScale;
+					v[i] = emitlight[trans->patch][i] * g_Patches[trans->patch].reflectivity[i];
 				}
 				VectorScale( v, trans->transfer, v );
+				
 				VectorAdd( sum, v, sum );
 			}
+			
 			VectorCopy( sum, addlight[j].light[0] );
 		}
 	}
@@ -1905,8 +1868,9 @@ void BounceLight (void)
 	{
 		// totallight has a copy of the direct lighting.  Move it to the emitted light and zero it out (to integrate bounces only)
 		VectorCopy( g_Patches[i].totallight.light[0], emitlight[i] );
+
 		if( g_bHL1Bounce )
-			VectorScale( emitlight[i], 1.0f/TRANSFER_SCALE, emitlight[i] );
+			VectorScale( emitlight[i], TRANSFER_DOWNSCALE, emitlight[i] );
 
 		// NOTE: This means that only the bounced light is integrated into totallight!
 		VectorFill( g_Patches[i].totallight.light[0], 0 );
@@ -1948,6 +1912,7 @@ void BounceLight (void)
 	i = 0;
 	while ( bouncing )
 	{
+		printf("\n");  //  not messing with threads.h
 		// transfer light from to the leaf patches from other patches via transfers
 		// this moves shooter->emitlight to receiver->addlight
 		unsigned int uiPatchCount = g_Patches.Size();
@@ -1966,10 +1931,8 @@ void BounceLight (void)
 		energystats+=added;
 
 
-		if ( i+1 == numbounce || (added[0] < 1.0f && added[1] < 1.0f && added[2] < 1.0f ) )
-		{
+		if ( i+1 == numbounce || (added[0] < 1.0 && added[1] < 1.0 && added[2] < 1.0 ) )
 			bouncing = false;
-		}
 
 		i++;
 		if ( g_bDumpPatches && !bouncing && i != 1)
@@ -2007,7 +1970,6 @@ RadWorld
 */
 void RadWorld_Start()
 {
-	//Warning( "RadWorld_Start\n" );
 	unsigned	i;
 
 	if (luxeldensity < 1.0)
@@ -2021,8 +1983,6 @@ void RadWorld_Start()
 				for( int k=0; k < 3; k++ )
 				{
 					oldLightmapVecs[i][j][k] = texinfo[i].lightmapVecsLuxelsPerWorldUnits[j][k];
-//					float tmpold = VectorNormalize( oldLightmapVecs[i][j] );
-//					printf("luxel density: current %f, target %f\n", tmpold, luxeldensity );
 				}
 			}
 		}
@@ -2036,7 +1996,6 @@ void RadWorld_Start()
 			{
 				Vector tmp( tx->lightmapVecsLuxelsPerWorldUnits[j][0], tx->lightmapVecsLuxelsPerWorldUnits[j][1], tx->lightmapVecsLuxelsPerWorldUnits[j][2] );
 				float scale = VectorNormalize( tmp );
-//				printf("luxel density: current %f, target %f\n", scale, luxeldensity );
 				// only rescale them if the current scale is "tighter" than the desired scale
 				// FIXME: since this writes out to the BSP file every run, once it's set high it can't be reset
 				// to a lower value.
@@ -2061,6 +2020,7 @@ void RadWorld_Start()
 		UpdateAllFaceLightmapExtents();
 	}
 
+	
 	MakeParents (0, -1);
 
 	BuildClusterTable();
@@ -2332,7 +2292,7 @@ bool RadWorld_Go()
 		//
 		// displacement surface luxel accumulation (make threaded!!!)
 		//
-		StaticDispMgr()->StartTimer( "Build Patch/Sample Hash Table(s)....." );
+		StaticDispMgr()->StartTimer( "\nBuild Patch/Sample Hash Table(s)....." );
 		StaticDispMgr()->InsertSamplesDataIntoHashTable();
 		StaticDispMgr()->InsertPatchSampleDataIntoHashTable();
 		StaticDispMgr()->EndTimer();
@@ -2414,6 +2374,7 @@ void VRAD_LoadBSP( char const *pFilename )
 	strcpy( global_lights, "lights.rad" );
 	if ( !g_pFileSystem->FileExists( global_lights ) )
 	{
+		
 		// Otherwise, try looking in the BIN directory from which we were run from
 		Msg( "Could not find lights.rad in %s.\nTrying VRAD BIN directory instead...\n", 
 			    global_lights );
@@ -2567,6 +2528,7 @@ void VRAD_Finish()
 
 	if ( verbose )
 	{
+		if( !g_bLightingFixes )
 		PrintBSPFileSizes();
 	}
 
@@ -2618,25 +2580,23 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 	int i;
 	for( i=1 ; i<argc ; i++ )
 	{
-		if ( !Q_stricmp(argv[i], "-DebugClouds" ) )
+		if ( !Q_stricmp( argv[i], "-StaticPropLighting" ) )
+		{
+			g_bStaticPropLighting = true;
+		}
+
+
+		else if ( !Q_stricmp(argv[i], "-DebugClouds" ) )
 		{
 			g_bDebugClouds = true;
 		}
-		else if ( !Q_stricmp(argv[i], "-Clouds" ) )
+		else if ( !Q_stricmp(argv[i], "-Cloudlight" ) )
 		{
-			g_bCloudLight = true;
+			g_bCloudlight = true;
 		}
 		else if ( !Q_stricmp(argv[i], "-AdaptiveScales" ) )
 		{
 			g_bAdaptiveScales = true;
-		}
-		else if ( !Q_stricmp(argv[i], "-AllPatchesEqual" ) )
-		{
-			g_bAllPatchesEqual = true;
-		}
-		else if ( !Q_stricmp(argv[i], "-MonteCarlo" ) )
-		{
-			g_bMonteCarloSpread = true;
 		}
 		else if ( !Q_stricmp(argv[i], "-SkipPointlights" ) )
 		{
@@ -2646,13 +2606,13 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 		{
 			g_bSkipSpotlights = true;
 		}
-		else if ( !Q_stricmp(argv[i], "-SkipSun" ) )
+		else if ( !Q_stricmp(argv[i], "-SkipSunSky" ) )
 		{
-			g_bSkipSun = true;
+			g_bSkipSunlight_Skylight = true;
 		}
-		else if ( !Q_stricmp(argv[i], "-SkipFakeLights" ) )
+		else if ( !Q_stricmp(argv[i], "-LightingFixes" ) )
 		{
-			g_bSkipFakeLights = true;
+			g_bLightingFixes = true;
 		}
 		/*else if ( !Q_stricmp(argv[i], "-DoDebug" ) )
 		{
@@ -2662,30 +2622,30 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 		{
 			g_bForceTexlights = true;
 		}
-		else if ( !Q_stricmp( argv[i], "-ForceAttn" ) )
-		{
-			g_bForceAttn = true;
-		}
-		else if ( !Q_stricmp(argv[i], "-HL1Bounce" ) )
+		else if ( !Q_stricmp(argv[i], "-ZHLTbounce" ) )
 		{
 			g_bHL1Bounce = true;
+			g_bPullFromChildren = false;
 		}
 		else if ( !Q_stricmp(argv[i], "-Uniform" ) )
 		{
-			g_bSuperUniform = true;
+			g_bUniform = true;
 		}
-		else if ( !Q_stricmp(argv[i], "-SimpleChildren" ) )
+		else if (!Q_stricmp(argv[i],"-TonemapGamma"))  //  simple tonemapping
 		{
-			g_bSimpleChildren = true;
+			if ( ++i < argc )
+			{
+				g_fTonemappingGamma = atof( argv[i] );
+			}
+			else
+			{
+				Warning("Error: expected a value after '-TonemapGamma'\n" );
+				return 1.0f;
+			}
 		}
-		else if ( !Q_stricmp(argv[i], "-SkipChildren" ) )
-		{
-			g_bSkipChildren = true;
-		}
-		else if ( !Q_stricmp( argv[i], "-StaticPropLighting" ) )
-		{
-			g_bStaticPropLighting = true;
-		}
+
+
+
 		else if ( !stricmp( argv[i], "-StaticPropNormals" ) )
 		{
 			g_bShowStaticPropNormals = true;
@@ -2757,7 +2717,7 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 			}
 			else
 			{
-				Warning("Error: expected a value after '-reflectivityscale' (max luxel intensity)\n" );
+				Warning("Error: expected a value after '-reflectivityscale'\n" );
 				return 1.0f;
 			}
 		}
@@ -2767,25 +2727,23 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 		{
 			if ( ++i < argc )
 			{
-				g_fTransCapRatio = atof( argv[i] );
+				InwardCornerLightbleedCap = atof( argv[i] );
 			}
 			else
 			{
-				Warning("Error: expected a value after '-TransCapRatio' (percent of max transfer in reference to 65K)\n" );
+				Warning("Error: expected a value after '-transfercap'\n" );
 				return 1.0f;
 			}
 		}
-
-
 		else if (!Q_stricmp(argv[i],"-brtcap"))
 		{
 			if ( ++i < argc )
 			{
-				MaxLuxelIntensity = atof( argv[i] );//at the end of radial.cpp
+				TargetLuxelIntensity = atof( argv[i] );  //  at the end of radial.cpp
 			}
 			else
 			{
-				Warning("Error: expected a value after '-brtcap' (max luxel intensity)\n" );
+				Warning("Error: expected a value after '-BrtCap' (max luxel intensity)\n" );
 				return 1e7;
 			}
 		}
@@ -2813,15 +2771,15 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 				return 1.0f;
 			}
 		}
-		else if (!Q_stricmp(argv[i],"-BounceScale"))
+		else if (!Q_stricmp(argv[i],"-indirectscale"))
 		{
 			if ( ++i < argc )
 			{
-				g_fBounceScale = atof( argv[i] );
+				flIndirectScale = atof( argv[i] );
 			}
 			else
 			{
-				Warning("Error: expected a value after '-BounceScale'\n" );
+				Warning("Error: expected a value after '-lightscale'\n" );
 				return 1.0f;
 			}
 		}
@@ -3275,7 +3233,7 @@ int RunVRAD( int argc, char **argv )
 
 	Msg("\n      Valve Radiosity Simulator     \n");
 
-	verbose = false;
+	verbose = true;  // Originally FALSE
 
 	bool onlydetail;
 	int i = ParseCommandLine( argc, argv, &onlydetail );
@@ -3287,6 +3245,9 @@ int RunVRAD( int argc, char **argv )
 	}
 
 	VRAD_LoadBSP( argv[i] );
+
+	if( g_bLightingFixes  &&  InwardCornerLightbleedCap != 0.4f )
+		printf("lightbleed cap %.3f\n", InwardCornerLightbleedCap );
 
 	if ( (! onlydetail) && (! g_bOnlyStaticProps ) )
 	{

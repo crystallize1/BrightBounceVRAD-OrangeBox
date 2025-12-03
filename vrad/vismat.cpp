@@ -490,7 +490,7 @@ void BuildVisMatrix (void)
 	{
 		qprintf("MakeTransfer: start...\n" );
 		RunThreadsOn (dvis->numclusters, true, BuildVisLeafs);
-		qprintf("MakeTransfer: %i transfers committed, %i aborted\n", TransferCounter, abortedtransfers );
+		qprintf("MakeTransfer: %i transfers committed, %.3f percent aborted\n", TransferCounter, (abortedtransfers/(float)TransferCounter)*100 );
 	}
 }
 

@@ -11,8 +11,9 @@ How to enable the algo:
 
 Hardcoded cloud lighting for skyboxes, that are used on maps before Ravenholm:  
 -Cloudlight
-![background010035](https://github.com/user-attachments/assets/9a1db12c-3391-4fc0-8974-3effa60e8f76)
 
+Example of cloudlight only:
+![background010035](https://github.com/user-attachments/assets/9a1db12c-3391-4fc0-8974-3effa60e8f76)
 
 Autobalance algo to figure out the optimal number of bounces.
 (prevents the bouncing light from a chain reaction)

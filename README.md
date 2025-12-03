@@ -8,6 +8,8 @@ How to enable the algo:
 
 Hardcoded cloud lighting for skyboxes, that are used on maps before Ravenholm:  
 -Cloudlight
+![background010035](https://github.com/user-attachments/assets/9a1db12c-3391-4fc0-8974-3effa60e8f76)
+
 
 Autobalance algo to figure out the optimal number of bounces.
 (prevents the bouncing light from a chain reaction)
@@ -34,7 +36,11 @@ Default game (HL2: Update):
 -ZHLTbounce
 ![7fe6926858812574160a6d8e79365c7b](https://github.com/user-attachments/assets/184fdba3-6d4f-4527-aa9b-31c6ba50562f)
 
--ZHLTbounce -uniform
+-ZHLTbounce -uniform (too bad I changed the algo and can't have these cool lightbleeds anymore, it stopped going crazy though)
 ![fac51803c3a0ce9577a9ace96b1c0383](https://github.com/user-attachments/assets/25c5c0a4-de9e-4f5f-9baa-cf63a7004f00)
+
+Enabling efects 1 by 1:
+![background03_variants](https://github.com/user-attachments/assets/86c067c8-8699-4d75-ab6f-b627f826a63b)
+
 
 
